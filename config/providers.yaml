@@ -1,0 +1,163 @@
+# =============================================================================
+# Provider registry
+# =============================================================================
+# Every provider below speaks the same "OpenAI compatible" wire format, so the
+# whole system needs only ONE HTTP code path:
+#     POST {base_url}/chat/completions      with     Authorization: Bearer <key>
+#
+# Gemini, Groq and OpenRouter all offer that shape, which is why switching
+# models is a config change instead of a code change.
+#
+# RULES
+#  * Never put a real API key in this file. Only the NAME of the environment
+#    variable that holds it (see .env.example).
+#  * Model ids drift over time. Verify with:
+#        python -m backend.cli models --provider groq
+#  * Limits below were read from the providers' own docs in Sept 2026. They
+#    change, so treat them as a safety net, not as gospel. Set a limit to 0 to
+#    mean "track it but never block on it".
+# =============================================================================
+
+providers:
+
+  # ---------------------------------------------------------------------------
+  # PRIMARY WORKHORSE: 1M tokens/minute and ~1500 requests/day on Flash models.
+  # This is the only free tier able to absorb real coding context windows.
+  # ---------------------------------------------------------------------------
+  gemini:
+    label: Google AI Studio (Gemini)
+    kind: openai_compatible
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    notes: >-
+      Free tier resets at midnight Pacific. Free-tier prompts may be used by
+      Google for model training, so never send secrets in a prompt.
+    limits:
+      requests_per_minute: 15
+      requests_per_day: 1500
+      tokens_per_minute: 1000000
+      tokens_per_day: 0
+    models:
+      gemini-3.8-flash:
+        context_window: 1000000
+        max_output_tokens: 8192
+        good_at: [planning, architecture, coding, long-context, review]
+      gemini-2.5-flash:
+        context_window: 1000000
+        max_output_tokens: 8192
+        good_at: [coding, review]
+      gemini-2.5-flash-lite:
+        context_window: 1000000
+        max_output_tokens: 8192
+        good_at: [summarising, small-edits, docs]
+
+  # ---------------------------------------------------------------------------
+  # BURST SECONDARY: very fast, but ONLY 8K tokens/minute and 200K tokens/day
+  # on the free plan. Great for short outputs, useless for dumping whole files.
+  # ---------------------------------------------------------------------------
+  groq:
+    label: Groq
+    kind: openai_compatible
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    notes: >-
+      Free plan is 30 RPM / 1000 RPD / 8K TPM / 200K TPD. Groq does not train
+      on your data. Because of the small token budget, keep prompts lean.
+    limits:
+      requests_per_minute: 30
+      requests_per_day: 1000
+      tokens_per_minute: 8000
+      tokens_per_day: 200000
+    models:
+      openai/gpt-oss-120b:
+        context_window: 131072
+        max_output_tokens: 4096
+        good_at: [small-edits, tests, review, speed]
+      openai/gpt-oss-20b:
+        context_window: 131072
+        max_output_tokens: 4096
+        good_at: [tests, classification, speed]
+      qwen/qwen3.8-27b:
+        context_window: 131072
+        max_output_tokens: 4096
+        good_at: [coding, small-edits]
+
+  # ---------------------------------------------------------------------------
+  # TERTIARY / INDEPENDENT REVIEWER: 20+ :free models behind one key.
+  # Free variants are capped at roughly 50 requests/day until you have bought
+  # 10 credits in total (then 1000/day). Use it as a fallback and as a
+  # *different* model family to review code written by Gemini.
+  #
+  # NOTE: model ids change often. The list below was verified against
+  # "python -m backend.cli models --provider openrouter --live --free-only"
+  # on 2026-09-24. Re-run that command and update ids here when a model 404s.
+  # ---------------------------------------------------------------------------
+  openrouter:
+    label: OpenRouter
+    kind: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    extra_headers:
+      HTTP-Referer: http://localhost
+      X-Title: senior-developer-agents
+    notes: >-
+      Only model ids ending in ":free" are free. A 200 from /models does NOT
+      prove your key is valid (that endpoint is public); a 401 on
+      /chat/completions means the key is wrong or revoked.
+    limits:
+      requests_per_minute: 20
+      requests_per_day: 50
+      tokens_per_minute: 0
+      tokens_per_day: 0
+    models:
+      qwen/qwen3.8-27b:free:
+        context_window: 131072
+        max_output_tokens: 4096
+        good_at: [review, second-opinion, coding]
+      z-ai/glm-5.2:free:
+        context_window: 131072
+        max_output_tokens: 4096
+        good_at: [review, second-opinion]
+      google/gemma-4-31b-it:free:
+        context_window: 131072
+        max_output_tokens: 4096
+        good_at: [review, docs]
+
+  # ---------------------------------------------------------------------------
+  # OFFLINE SAFETY NET. No key, no network, no quota. Two jobs:
+  #   1. let every command work before you have any API key at all, and
+  #   2. let the test suite prove the retry / backoff / failover logic.
+  # ---------------------------------------------------------------------------
+  mock:
+    label: Offline mock (always succeeds)
+    kind: mock
+    base_url: mock://local
+    api_key_env: ""
+    notes: Deterministic echo used as the last resort in every routing chain.
+    models:
+      mock-echo:
+        context_window: 8192
+        max_output_tokens: 1024
+        good_at: [offline-demo]
+    mock:
+      reply: "MOCK OK: every provider in the chain failed, so this offline mock answered instead."
+      fail_times: 0
+
+  mock_flaky:
+    label: Offline mock (simulates a rate limited provider)
+    kind: mock
+    base_url: mock://local
+    api_key_env: ""
+    notes: >-
+      Always returns HTTP 429 until it is put on cooldown, which is how we
+      demonstrate retries, exponential backoff and failover with zero cost.
+    models:
+      mock-echo:
+        context_window: 8192
+        max_output_tokens: 1024
+        good_at: [offline-demo]
+    mock:
+      reply: "this reply should never be seen, because this provider always fails"
+      fail_times: 9999
+      fail_with: rate_limit
+      retry_after: 2.0

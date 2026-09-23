@@ -1,0 +1,203 @@
+"""Loads ``config/*.yaml`` into typed objects.
+
+This is the only module that knows the config file format. Everything else asks
+the registry questions like "which models should the *coder* agent try, in what
+order?" That keeps the model-assignment policy out of the code, which was an
+explicit requirement.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from backend.core.config import Settings, read_yaml
+from backend.core.errors import ConfigError, MissingApiKey
+from backend.core.provider.schemas import ModelSpec, ProviderSpec
+from backend.core.secrets import get_api_key
+
+
+class _Base(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
+class RetryConfig(_Base):
+    max_attempts_per_provider: int = 3
+    base_delay_seconds: float = 1.5
+    max_delay_seconds: float = 30.0
+    jitter: bool = True
+
+
+class CooldownConfig(_Base):
+    on_rate_limit_seconds: int = 60
+    on_auth_error_seconds: int = 900
+    on_credits_seconds: int = 3600
+    on_server_error_seconds: int = 30
+    on_network_error_seconds: int = 20
+
+
+class BudgetConfig(_Base):
+    max_calls_per_run: int = 60
+    max_tokens_per_run: int = 400_000
+
+
+class RequestConfig(_Base):
+    timeout_seconds: float = 120.0
+    temperature_default: float = 0.2
+    stream: bool = False
+
+
+class LimitsConfig(_Base):
+    retry: RetryConfig = Field(default_factory=RetryConfig)
+    cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    request: RequestConfig = Field(default_factory=RequestConfig)
+
+
+class RouteCandidate(_Base):
+    """One step of an agent's fallback chain."""
+
+    provider: str
+    model: str
+
+
+class AgentConfig(_Base):
+    name: str
+    role: str = ""
+    prompt_file: str = ""
+    temperature: float = 0.2
+    max_output_tokens: int = 4096
+    routing: list[RouteCandidate] = Field(default_factory=list)
+
+    def prompt_path(self, root: Path) -> Path:
+        if not self.prompt_file:
+            raise ConfigError(f"Agent '{self.name}' has no prompt_file configured")
+        path = Path(self.prompt_file)
+        return path if path.is_absolute() else (root / path)
+
+
+class Registry:
+    """In-memory view of all configuration."""
+
+    def __init__(
+        self,
+        *,
+        providers: dict[str, ProviderSpec],
+        agents: dict[str, AgentConfig],
+        limits: LimitsConfig,
+        root: Path,
+    ) -> None:
+        self.providers = providers
+        self.agents = agents
+        self.limits = limits
+        self.root = Path(root)
+
+    # -- construction -------------------------------------------------------
+    @classmethod
+    def load(cls, settings: Settings) -> Registry:
+        files = settings.config_files
+        limits_path = files["limits"]
+        return cls.from_dict(
+            providers_raw=read_yaml(files["providers"]),
+            agents_raw=read_yaml(files["agents"]),
+            limits_raw=read_yaml(limits_path) if limits_path.exists() else {},
+            root=settings.root,
+        )
+
+    @classmethod
+    def from_dict(
+        cls,
+        *,
+        providers_raw: dict,
+        agents_raw: dict,
+        limits_raw: dict | None = None,
+        root: Path | str,
+    ) -> Registry:
+        providers: dict[str, ProviderSpec] = {}
+        for name, raw in (providers_raw.get("providers") or {}).items():
+            payload = dict(raw or {})
+            payload["name"] = name
+            spec = ProviderSpec.model_validate(payload)
+            if not spec.base_url:
+                raise ConfigError(f"Provider '{name}' has no base_url")
+            # The key in the YAML map IS the model id; make that explicit on the object.
+            spec.models = {
+                model_id: (
+                    model
+                    if model.id
+                    else model.model_copy(update={"id": model_id})
+                )
+                for model_id, model in spec.models.items()
+            }
+            providers[name] = spec
+
+        agents: dict[str, AgentConfig] = {}
+        for name, raw in (agents_raw.get("agents") or {}).items():
+            payload = dict(raw or {})
+            payload["name"] = name
+            agent = AgentConfig.model_validate(payload)
+            for candidate in agent.routing:
+                if candidate.provider not in providers:
+                    raise ConfigError(
+                        f"Agent '{name}' routes to unknown provider '{candidate.provider}'"
+                    )
+                model_ids = providers[candidate.provider].models
+                if candidate.model not in model_ids:
+                    raise ConfigError(
+                        f"Agent '{name}' routes to model '{candidate.model}' which is not "
+                        f"listed under provider '{candidate.provider}' in providers.yaml"
+                    )
+            agents[name] = agent
+
+        limits = LimitsConfig.model_validate(limits_raw or {})
+        return cls(providers=providers, agents=agents, limits=limits, root=Path(root))
+
+    # -- lookups ------------------------------------------------------------
+    def provider(self, name: str) -> ProviderSpec:
+        try:
+            return self.providers[name]
+        except KeyError as exc:
+            known = ", ".join(sorted(self.providers)) or "(none)"
+            raise ConfigError(f"Unknown provider '{name}'. Known providers: {known}") from exc
+
+    def agent(self, name: str) -> AgentConfig:
+        try:
+            return self.agents[name]
+        except KeyError as exc:
+            known = ", ".join(sorted(self.agents)) or "(none)"
+            raise ConfigError(f"Unknown agent '{name}'. Known agents: {known}") from exc
+
+    def resolve(self, provider_name: str, model_id: str) -> tuple[ProviderSpec, ModelSpec]:
+        spec = self.provider(provider_name)
+        return spec, spec.model(model_id)
+
+    def candidate_chain(self, agent_name: str) -> list[tuple[ProviderSpec, ModelSpec]]:
+        """Full routing chain for an agent, in priority order."""
+        agent = self.agent(agent_name)
+        return [self.resolve(c.provider, c.model) for c in agent.routing]
+
+    def api_key_for(self, spec: ProviderSpec, *, required: bool = False) -> str | None:
+        key = get_api_key(spec.api_key_env, provider=spec.name)
+        if key is None and required and spec.requires_key:
+            raise MissingApiKey(spec.name, spec.api_key_env)
+        return key
+
+    def provider_status(self) -> list[dict]:
+        """Rows for the ``providers`` CLI command and the settings screen."""
+        rows = []
+        for name, spec in self.providers.items():
+            key = self.api_key_for(spec)
+            rows.append(
+                {
+                    "provider": name,
+                    "label": spec.label or name,
+                    "kind": spec.kind,
+                    "requires_key": spec.requires_key,
+                    "key_present": key is not None,
+                    "api_key_env": spec.api_key_env,
+                    "models": sorted(spec.models),
+                }
+            )
+        return rows
+

@@ -1,0 +1,55 @@
+# =============================================================================
+# Agent registry: which model each agent uses, and in what fallback order.
+# =============================================================================
+# Each agent has a "routing" list. The router walks it top to bottom:
+#   first entry  = first choice
+#   later entries = automatic fallbacks when a provider is rate limited,
+#                   out of daily quota, cooling down, or missing a key.
+#
+# The last entry of every chain should be an offline mock so that the system
+# always has *something* to answer with while you are setting up keys.
+# =============================================================================
+
+agents:
+
+  # Phase 1: the one real agent. Ask it anything from the command line.
+  code:
+    role: General-purpose software engineer used to smoke-test the provider layer.
+    prompt_file: backend/core/agents/prompts/code.md
+    temperature: 0.2
+    max_output_tokens: 4096
+    routing:
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: groq
+        model: openai/gpt-oss-120b
+      - provider: openrouter
+        model: qwen/qwen3.8-27b:free
+      - provider: mock
+        model: mock-echo
+
+  # Offline demonstration agent: the first provider always fails with 429, so
+  # you can watch retries, backoff, cooldown and failover without spending a
+  # single token of free quota.
+  demo:
+    role: Offline failover demonstration.
+    prompt_file: backend/core/agents/prompts/demo.md
+    temperature: 0.0
+    max_output_tokens: 512
+    routing:
+      - provider: mock_flaky
+        model: mock-echo
+      - provider: mock
+        model: mock-echo
+
+# =============================================================================
+# Model assignment per role (used from Phase 2 onwards; kept here so the whole
+# policy lives in one place). Rationale is in docs/DECISIONS.md.
+#   planner / architect : Gemini Flash  -> needs a long context window
+#   coder               : Gemini Flash  -> writing files = large outputs
+#   tester              : Groq gpt-oss  -> short, fast, deterministic output
+#   reviewer            : OpenRouter    -> a DIFFERENT model family on purpose:
+#                                         a model reviewing its own work is
+#                                         biased towards saying "looks good"
+#   devops / docs       : Gemini Flash-Lite -> simple, high-volume tasks
+# =============================================================================

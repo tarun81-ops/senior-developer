@@ -1,0 +1,35 @@
+# =============================================================================
+# Runtime behaviour: retries, backoff, cooldowns and hard budget ceilings.
+# =============================================================================
+# These numbers are the difference between "agent waits politely" and "agent
+# burns a whole day of free quota in five minutes". Keep them conservative.
+
+retry:
+  # How many times to retry ONE provider before falling back to the next one.
+  max_attempts_per_provider: 3
+  # Exponential backoff: base * 2^(attempt-1), capped at max_delay_seconds.
+  base_delay_seconds: 1.5
+  max_delay_seconds: 30
+  # Add random +/-50% so several agents do not wake up and retry in lockstep.
+  jitter: true
+
+cooldown:
+  # How long to stop using a provider after a failure (circuit breaker).
+  on_rate_limit_seconds: 60      # usually recovers within a minute
+  on_auth_error_seconds: 900     # bad key: no point retrying for 15 minutes
+  on_credits_seconds: 3600       # "no credits": retrying this hour is pointless
+  on_server_error_seconds: 30
+  on_network_error_seconds: 20
+
+budget:
+  # Per run (one CLI command): refuse to keep going past these ceilings and ask
+  # a human what to do instead of looping forever.
+  max_calls_per_run: 60
+  max_tokens_per_run: 400000
+
+request:
+  timeout_seconds: 120
+  temperature_default: 0.2
+  # Phase 1 is synchronous: easier to read, easier to debug. Streaming lands
+  # with the UI in Phase 4.
+  stream: false

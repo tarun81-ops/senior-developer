@@ -1,0 +1,35 @@
+# --- Secrets: never commit these ---
+.env
+.env.*
+!.env.example
+data/secrets.json
+
+# --- Runtime state / generated output ---
+data/
+workspace/
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# --- Node / Electron ---
+node_modules/
+desktop/dist/
+desktop/out/
+desktop/release/
+*.log
+
+# --- Editors / OS ---
+.vscode/*
+!.vscode/extensions.json
+.idea/
+Thumbs.db
+desktop.ini
