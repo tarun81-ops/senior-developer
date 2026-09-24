@@ -9,9 +9,9 @@ checks guard every request:
    so the "approve this command?" dialog cannot be forged from a random tab.
 2. **A Host header check** — only loopback host names are served, which blocks
    DNS-rebinding attacks (a hostile page resolving its own name to 127.0.0.1).
-3. **An Origin allowlist for CORS** — only the Vite dev servers and the Electron
-   ``file://`` origin may talk to the API. CORS is a browser rule, not auth, so
-   it is defence in depth *on top of* the token, never instead of it.
+3. **An Origin allowlist for CORS** — only the Vite dev servers and our own
+   ``sda://`` app origin may talk to the API. CORS is a browser rule, not auth,
+   so it is defence in depth *on top of* the token, never instead of it.
 
 The token is intentionally not configurable through the environment: a token
 pinned in a file would outlive the process that generated it.
@@ -19,6 +19,7 @@ pinned in a file would outlive the process that generated it.
 
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass, field
 
@@ -27,14 +28,23 @@ from fastapi import Header, HTTPException, Request, status
 #: Header carrying the per-launch token on every request.
 API_KEY_HEADER = "X-API-Key"
 
-#: Vite dev server + Electron's packaged origin. ``file://`` is what the
-#: Electron renderer reports as its Origin in production; the Electron main
-#: process sends no Origin at all.
+#: Origins that are served verbatim. In development the UI is Vite's dev server
+#: on 5173; in production Part B registers the custom ``sda:`` scheme (see
+#: :data:`APP_SCHEME_ORIGIN`) so the packaged renderer never reports ``null``.
 ALLOWED_ORIGINS: tuple[str, ...] = (
     "http://127.0.0.1:5173",
     "http://localhost:5173",
-    "file://",
 )
+
+#: Origins served from our own custom protocol.
+#:
+#: An Electron renderer loaded over ``file://`` reports ``Origin: null``, which
+#: is not a value any allowlist can usefully pin down: every sandboxed iframe and
+#: every ``data:`` page also reports ``null``. Part B therefore registers ``sda:``
+#: as a *standard, secure* scheme and serves the built UI from ``sda://app/…``,
+#: which produces a real, checkable origin. ``null`` stays denied.
+APP_SCHEME = "sda"
+APP_SCHEME_ORIGIN = re.compile(rf"^sda://[a-z0-9.-]+(?::\d+)?$", re.IGNORECASE)
 
 #: Host header values we answer to. The port is whatever uvicorn is told to use,
 #: so it is checked separately from the host name.
@@ -78,12 +88,33 @@ def is_allowed_host(host_header: str | None) -> bool:
 
 
 def is_allowed_origin(origin: str | None) -> bool:
-    """True when ``Origin`` is one of :data:`ALLOWED_ORIGINS`.
+    """True when ``Origin`` is a Vite dev server or our own ``sda://`` origin.
 
     A request with no ``Origin`` (Electron main process, curl, the test client)
     is *not* rejected here; only a *present, unknown* origin is a violation.
+
+    ``Origin: null`` is rejected on purpose. It is what an Electron renderer
+    loaded over ``file://`` reports, but it is also what every sandboxed iframe
+    and ``data:`` page reports, so allowing it would allow all of them. Part B
+    avoids the problem instead of permitting it: the shell registers the custom
+    ``sda:`` scheme and loads the built UI from ``sda://app/…``.
     """
-    return origin is None or origin in ALLOWED_ORIGINS
+    if origin is None:
+        return True
+    return origin in ALLOWED_ORIGINS or bool(APP_SCHEME_ORIGIN.match(origin))
+
+
+def _too_large(received: int | None = None) -> HTTPException:
+    """The single 413 body both the header check and the byte counter return."""
+    where = f"Request body is at least {received} bytes; " if received is not None else ""
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail=(
+            f"{where}the limit is {MAX_REQUEST_BYTES} bytes. "
+            "Run requests are prose, not file uploads."
+        ),
+    )
+
 
 
 @dataclass(frozen=True)
@@ -116,6 +147,13 @@ class LaunchSecurity:
             )
 
     def check_body_size(self, request: Request) -> None:
+        """Cheap early exit on a declared Content-Length.
+
+        This is *not* the authoritative size limit — a chunked request may
+        declare no length at all (or a dishonest one). The real cap is
+        :class:`~backend.api.middleware.BodySizeLimitMiddleware`, which counts
+        the bytes the server actually receives.
+        """
         raw = request.headers.get("content-length")
         if raw is None:
             return
@@ -132,13 +170,7 @@ class LaunchSecurity:
                 detail="Invalid Content-Length header",
             )
         if length > MAX_REQUEST_BYTES:
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail=(
-                    f"Request body is {length} bytes; the limit is {MAX_REQUEST_BYTES}. "
-                    "Run requests are prose, not file uploads."
-                ),
-            )
+            raise _too_large(length)
 
 
 async def require_token(
@@ -156,3 +188,4 @@ async def require_token(
     security.check_origin(request.headers.get("origin"))
     security.check_body_size(request)
     security.check_token(x_api_key)
+

@@ -16,6 +16,19 @@ class AgentSystemError(Exception):
     """Base class for every error this project raises on purpose."""
 
 
+class RunCancelled(AgentSystemError):
+    """A human cancelled the run (the API's ``POST /runs/{id}/cancel``).
+
+    Not a failure: the board keeps whatever stages already completed, the rest
+    are marked skipped, and the run's status becomes ``cancelled``. The CLI has
+    no way to trigger this; only the API can, which is why the type lives here
+    rather than in ``backend/api``.
+    """
+
+    def __init__(self, message: str = "run cancelled by user") -> None:
+        super().__init__(message)
+
+
 class ConfigError(AgentSystemError):
     """The YAML config or the environment is wrong."""
 

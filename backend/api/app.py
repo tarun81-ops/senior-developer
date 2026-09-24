@@ -29,9 +29,10 @@ from fastapi.responses import JSONResponse
 
 from backend import __version__
 from backend.api.event_store import EventStore
+from backend.api.middleware import BodySizeLimitMiddleware
 from backend.api.models import EventResponse, EventsPageResponse, HealthResponse
 from backend.api.repository import SqliteEventRepository
-from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
+from backend.api.security import ALLOWED_ORIGINS, APP_SCHEME, LaunchSecurity, require_token
 from backend.core.config import Settings, get_settings, load_env
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,10 @@ def create_app(
     # CORS is a browser rule, not authentication: it only tells a *browser*
     # whether to let page JavaScript read the response. The token still guards
     # every request (security.py).
+    #
+    # The app's own ``sda://`` origin is a regular expression (any host under the
+    # scheme), which CORSMiddleware cannot express, so the allowlist keeps the
+    # two Vite origins and the Origin *check* in security.py covers ``sda://``.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(ALLOWED_ORIGINS),
@@ -107,6 +112,10 @@ def create_app(
         allow_headers=["Content-Type", "X-API-Key"],
         max_age=600,
     )
+
+    # Added last, so it is the outermost middleware: it is the first thing a
+    # request meets and it counts real body bytes, which no header check can do.
+    app.add_middleware(BodySizeLimitMiddleware)
 
     api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 

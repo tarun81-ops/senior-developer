@@ -66,6 +66,34 @@ def test_only_local_ui_origins_are_allowed() -> None:
     assert not is_allowed_origin("https://evil.example.com")
 
 
+def test_origin_null_is_rejected_and_the_custom_scheme_is_allowed() -> None:
+    """Electron renderers over file:// report ``Origin: null``.
+
+    ``null`` is not a value an allowlist can pin down (every sandboxed iframe
+    and every ``data:`` page reports it too), so it stays denied; Part B serves
+    the built UI from the custom ``sda://app/`` origin instead, which is a
+    real, checkable origin.
+    """
+    assert not is_allowed_origin("null")
+    assert is_allowed_origin("sda://app")
+    assert is_allowed_origin("sda://app.local:5173")
+    # not a prefix match: sda:evil is a different scheme, and a trailing path
+    # is not an origin
+    assert not is_allowed_origin("sda-evil://app")
+    assert not is_allowed_origin("sda://app/../../etc")
+
+
+def test_null_origin_is_refused_over_http(client: TestClient) -> None:
+    response = client.get("/api/health", headers={"Origin": "null"})
+    assert response.status_code == 403
+    assert "null" in response.json()["detail"]
+
+
+def test_custom_scheme_origin_is_accepted_over_http(client: TestClient) -> None:
+    response = client.get("/api/health", headers={"Origin": "sda://app"})
+    assert response.status_code == 200
+
+
 def test_every_api_request_requires_the_token(client: TestClient, token: str) -> None:
     assert client.get("/api/health").status_code == 200
     assert client.get("/api/health", headers={"X-API-Key": "wrong"}).status_code == 401
@@ -116,6 +144,117 @@ def test_oversized_body_is_refused(client: TestClient) -> None:
 def test_content_length_must_be_a_number(client: TestClient) -> None:
     bad = client.get("/api/health", headers={"Content-Length": "not-a-number"})
     assert bad.status_code == 400
+
+
+# -- body cap on bytes actually received --------------------------------------
+def _raw_post(app, chunks: list[bytes], *, headers: dict[str, str]) -> tuple[int, bytes]:
+    """POST pre-built ASGI messages (no Content-Length) straight into the app.
+
+    ``TestClient``/httpx always computes a Content-Length for a bytes body, so
+    the chunked case — the one a header check cannot see — needs a hand-rolled
+    ASGI call. The scope and messages are the minimum ASGI requires.
+    """
+    import asyncio
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/probe",
+        "raw_path": b"/api/probe",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "client": ("127.0.0.1", 5000),
+        "server": ("127.0.0.1", 8765),
+    }
+    sent: list[bytes] = []
+    messages = [
+        {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": index < len(chunks) - 1,
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+
+    async def receive():
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            sent.append(str(message["status"]).encode())
+        elif message["type"] == "http.response.body":
+            sent.append(message.get("body", b""))
+
+    asyncio.run(app(scope, receive, send))
+    return int(sent[0]), b"".join(sent[1:])
+
+
+def test_chunked_body_over_the_cap_is_refused_without_a_content_length(tmp_path: Path) -> None:
+    """A chunked upload has no Content-Length, so only the byte counter can stop it."""
+    from backend.api.app import create_app
+
+    app = create_app(root=tmp_path, token="t")
+    # start the lifespan so the app state exists, as a real server would
+    with TestClient(app, base_url="http://127.0.0.1:8765"):
+        status, body = _raw_post(
+            app,
+            [b"x" * 100_000 for _ in range(3)],
+            headers={
+                "host": "127.0.0.1:8765",
+                "x-api-key": "t",
+                "content-type": "text/plain",
+            },
+        )
+    assert status == 413
+    assert b"limit" in body
+
+
+def test_chunked_body_under_the_cap_is_delivered_whole() -> None:
+    """The cap must not truncate a legitimate body: the endpoint sees all of it."""
+    from backend.api.middleware import BodySizeLimitMiddleware
+
+    seen: dict[str, int] = {}
+
+    async def echo_body(scope, receive, send) -> None:  # noqa: ANN001 - raw ASGI
+        body = b""
+        more = True
+        while more:
+            message = await receive()
+            body += message.get("body", b"")
+            more = message.get("more_body", False)
+        seen["len"] = len(body)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    status, body = _raw_post(
+        BodySizeLimitMiddleware(echo_body),
+        [b"y" * 10_000 for _ in range(3)],
+        headers={"host": "127.0.0.1:8765", "content-type": "text/plain"},
+    )
+    assert seen["len"] == 30_000
+    assert (status, body) == (200, b"ok")
+
+
+def test_oversized_body_with_a_lying_content_length_is_refused(tmp_path: Path) -> None:
+    """A declared length under the cap must not smuggle a bigger body through."""
+    from backend.api.app import create_app
+
+    app = create_app(root=tmp_path, token="t")
+    with TestClient(app, base_url="http://127.0.0.1:8765"):
+        status, _ = _raw_post(
+            app,
+            [b"z" * 300_000],
+            headers={
+                "host": "127.0.0.1:8765",
+                "x-api-key": "t",
+                "content-type": "text/plain",
+                "content-length": "10",  # a lie; the counter does not believe it
+            },
+        )
+    assert status == 413
 
 
 def test_cors_preflight_allows_the_vite_origin_only(client: TestClient) -> None:

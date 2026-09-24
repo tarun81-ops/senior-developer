@@ -287,14 +287,30 @@ seam for that move.
 
 ---
 
-## Phase plan
+## D19 — The UI streams events with `fetch()`, not `EventSource` (Phase 4)
 
-| Phase | Deliverable | Status |
-|---|---|---|
-| 0 | Research, provider reality check, architecture decisions | done |
-| 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
-| 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
-| 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 1 of 6: API foundations) |
-| 5 | Deploy generated apps (Vercel + Render) | not started |
+**Decision:** the live event stream is a Server-Sent Events endpoint, but the
+desktop client reads it with `fetch()` + `ReadableStream` and decodes the SSE
+frames itself, sending the per-launch token in the `X-API-Key` request header.
+`EventSource` is not used anywhere in the UI.
 
+**Why:** the browser `EventSource` API cannot set request headers. D17 requires
+a token on *every* request, and the token is the control that makes approving a
+command safe. So the only two options were `EventSource` with the token in the
+query string (leaks it into server logs, browser history and any proxy log) or
+`fetch` with a header. The header is the right place for a secret, and a
+hand-decoded SSE reader is about thirty lines in the UI.
+
+**Consequences for step 5, now fixed in the design:** the stream endpoint
+answers `text/event-stream` and the client must (a) pass `X-API-Key`, (b) pass
+`after_seq` to resume, (c) append a timestamped comment frame every ~20s to keep
+the connection warm, and (d) reconnect with exponential backoff, resuming from
+the last `seq` it saw. A `Last-Event-ID` header is honoured as an equivalent of
+`after_seq` so the stream behaves like a standard SSE endpoint for any future
+non-UI consumer.
+
+**Cost accepted:** no automatic reconnection and no `Last-Event-ID` handling
+from the browser, so the client owns that loop. That is deliberate: the
+reconnect policy has to be the same policy the run manager uses when a run dies.
+
+---
