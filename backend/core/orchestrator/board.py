@@ -104,6 +104,8 @@ class TaskBoard:
         agents: dict[str, str] | None = None,
         records: dict[str, StageRecord] | None = None,
         order: list[str] | None = None,
+        project: str = "",
+        executions: list[dict[str, Any]] | None = None,
         created_at: str = "",
         updated_at: str = "",
         path: Path | None = None,
@@ -111,6 +113,11 @@ class TaskBoard:
         self.run_id = run_id
         self.goal = goal
         self.path = path
+        #: Phase 3: the workspace project folder this run wrote into
+        self.project = project
+        #: Phase 3: command runs (already serialised, so board.py needs no
+        #: import from the workspace package and there is no import cycle)
+        self.executions: list[dict[str, Any]] = list(executions or [])
         self.created_at = created_at or _now()
         self.updated_at = updated_at
         self.order: list[str] = list(order or stages)
@@ -124,9 +131,17 @@ class TaskBoard:
     # -- construction -------------------------------------------------------
     @classmethod
     def new(
-        cls, *, run_id: str, goal: str, stages: list[str], agents: dict[str, str]
+        cls,
+        *,
+        run_id: str,
+        goal: str,
+        stages: list[str],
+        agents: dict[str, str],
+        project: str = "",
     ) -> TaskBoard:
-        return cls(run_id=run_id, goal=goal, stages=stages, agents=agents)
+        return cls(
+            run_id=run_id, goal=goal, stages=stages, agents=agents, project=project
+        )
 
     @classmethod
     def load(cls, path: Path | str) -> TaskBoard:
@@ -141,6 +156,10 @@ class TaskBoard:
             stages=[],
             records=records,
             order=[str(s) for s in raw.get("order") or []],
+            project=str(raw.get("project") or ""),
+            executions=[
+                dict(item) for item in raw.get("executions") or [] if isinstance(item, dict)
+            ],
             created_at=str(raw.get("created_at") or ""),
             updated_at=str(raw.get("updated_at") or ""),
             path=Path(path),
@@ -175,8 +194,10 @@ class TaskBoard:
         return {
             "run_id": self.run_id,
             "goal": self.goal,
+            "project": self.project,
             "order": list(self.order),
             "records": {name: rec.to_dict() for name, rec in self.records.items()},
+            "executions": list(self.executions),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -208,6 +229,48 @@ class TaskBoard:
             return None
         verdict = str(record.parsed.get("verdict") or "").strip().lower()
         return verdict or None
+
+    # -- executions (Phase 3) ----------------------------------------------
+    def add_execution(self, result: Any) -> dict[str, Any]:
+        """Record one command run. Accepts a CommandResult or a plain dict."""
+        payload = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+        payload.setdefault("ran_at", _now())
+        self.executions.append(payload)
+        self.save()
+        return payload
+
+    @property
+    def last_execution(self) -> dict[str, Any] | None:
+        return self.executions[-1] if self.executions else None
+
+    @property
+    def tests_failed(self) -> bool:
+        last = self.last_execution
+        return last is not None and not last.get("ok")
+
+    def execution_context(self, *, max_chars: int = 6000) -> str | None:
+        """The compact ``### execution`` block the coder/reviewer prompts get.
+
+        Only the last run is shown: earlier failures are history, and the model
+        needs the current evidence, not the whole log.
+        """
+        last = self.last_execution
+        if last is None:
+            return None
+        status = "TIMED OUT" if last.get("timed_out") else f"exit {last.get('exit_code')}"
+        lines = [
+            f"command: {last.get('command')}",
+            f"result: {status} ({'ok' if last.get('ok') else 'FAILED'})",
+            f"runs so far in this pipeline: {len(self.executions)}",
+        ]
+        for stream in ("stdout", "stderr"):
+            text = str(last.get(stream) or "").strip()
+            if text:
+                lines.append(f"{stream}:\n{text}")
+        block = "\n".join(lines)
+        if len(block) > max_chars:
+            block = block[:max_chars] + "\n... [output cut for the prompt] ..."
+        return block
 
     # -- mutations (each keeps the on-disk board fresh) ---------------------
     def start(self, stage: str, *, agent: str) -> StageRecord:

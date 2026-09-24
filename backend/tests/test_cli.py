@@ -240,6 +240,125 @@ def test_build_unresolved_review_returns_exit_code_review(
     assert exit_code == cli.EXIT_REVIEW
 
 
+def test_build_reports_tests_exit_code_when_tests_keep_failing(
+    capsys: pytest.CaptureFixture[str],
+    fake_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.core.orchestrator import PipelineResult
+
+    class FakePipeline:
+        def __init__(self, runtime, **kwargs) -> None:
+            pass
+
+        def run(self, goal: str) -> PipelineResult:
+            return PipelineResult(
+                run_id="fake",
+                goal=goal,
+                ok=False,
+                reason="tests",
+                stages=["coder", "tester"],
+                verdict="approve",
+                board_path="unused.json",
+                tests={"command": "python -m pytest -q", "ok": False, "exit_code": 1},
+            )
+
+    monkeypatch.setattr(cli, "Pipeline", FakePipeline)
+    exit_code = cli.main(["build", "whatever", "--quiet", "--json"])
+
+    assert exit_code == cli.EXIT_TESTS
+
+
+def test_build_offline_with_no_apply_and_no_run_tests(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    import json
+
+    exit_code = cli.main(
+        [
+            "build",
+            "a tiny offline goal",
+            "--provider",
+            "mock",
+            "--no-apply",
+            "--no-run-tests",
+            "--quiet",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == cli.EXIT_OK
+    assert payload["ok"] is True
+    assert payload["tests"] is None
+    assert not list((fake_root / "workspace").glob("*"))  # no project was written
+
+
+def test_run_refuses_to_guess_without_a_project(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    exit_code = cli.main(["run"])
+    captured = capsys.readouterr()
+
+    assert exit_code == cli.EXIT_PROBLEM
+    assert "No generated project yet" in captured.err
+
+
+def test_run_reruns_the_recorded_command(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    import json
+
+    from backend.core.orchestrator import TaskBoard
+
+    # a project on disk plus a board that recorded its test command
+    project_dir = fake_root / "workspace" / "demo"
+    project_dir.mkdir(parents=True)
+    board = TaskBoard.new(
+        run_id="seed",
+        goal="g",
+        stages=["tester"],
+        agents={},
+        project="demo",
+    )
+    board.save(fake_root / "data" / "runs" / "seed" / "board.json")
+    board.start("tester", agent="tester")
+    board.complete(
+        "tester",
+        text="{}",
+        parsed={"run_command": "python -c \"print('rerun ok')\""},
+        target="mock/m",
+        tokens=1,
+        latency_ms=1,
+    )
+    board.save(fake_root / "data" / "runs" / "seed" / "board.json")
+
+    exit_code = cli.main(["run", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == cli.EXIT_OK
+    assert payload["project"] == "demo"
+    assert payload["ok"] is True
+    assert "rerun ok" in payload["stdout"]
+    # the re-run is appended to the board, so the UI can show it later
+    reloaded = TaskBoard.load(fake_root / "data" / "runs" / "seed" / "board.json")
+    assert len(reloaded.executions) == 1
+
+
+def test_run_refuses_a_command_off_the_allowlist(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    (fake_root / "workspace" / "demo").mkdir(parents=True)
+
+    exit_code = cli.main(["run", "--project", "demo", "--command", "curl http://example.com"])
+    captured = capsys.readouterr()
+
+    assert exit_code == cli.EXIT_PROBLEM
+    assert "REFUSED" in captured.err
+    assert "allowlist" in captured.err
+
+
+
 def test_unknown_agent_is_a_config_error(
     capsys: pytest.CaptureFixture[str], fake_root: Path
 ) -> None:

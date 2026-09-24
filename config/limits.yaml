@@ -37,3 +37,25 @@ request:
   # Phase 1 is synchronous: easier to read, easier to debug. Streaming lands
   # with the UI in Phase 4.
   stream: false
+
+execution:
+  # Phase 3: running the generated project's own commands (tests, builds).
+  # Everything runs INSIDE workspace/<project>/ with shell=False and only the
+  # executables listed here; anything else is refused before a process starts.
+  enabled: true
+  allow:
+    - python
+    - py
+    - pytest
+    - npm
+    - node
+    - npx
+  # Kill the process tree after this long. Free-tier agents can generate a
+  # command that waits forever (a server, an input prompt); we never want the
+  # pipeline to hang on it.
+  timeout_seconds: 300
+  # Keep the capture bounded: store head and tail, never a 50 MB log in the board.
+  max_output_bytes: 20000
+  env:
+    PYTHONIOENCODING: utf-8
+    PYTHONDONTWRITEBYTECODE: "1"

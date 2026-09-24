@@ -194,6 +194,51 @@ produce a verdict must never look like one that approved.
 
 ---
 
+## D15 — Generated code runs, but only inside `workspace/` (Phase 3)
+
+**Decision:** stage manifests are written into `workspace/<project>/` and commands
+are executed there only. Writes go through one sandbox that rejects absolute
+paths, `..` segments, NUL bytes and Windows device names, slugifies the project
+name, and re-resolves the final path to prove it is inside the project.
+Execution uses `shell=False` with an executable allowlist
+(`execution.allow` in `config/limits.yaml`), a timeout that kills the process
+tree, `cwd` pinned to the project, and head+tail truncated capture.
+
+**Why:** prompts are untrusted input and this tool writes to the user's real
+disk and runs real processes. Path validation catches the common escapes;
+`shell=False` means `&&`, `|`, `>` and backticks are literal characters, so
+injection has nothing to inject into; the allowlist stops a model from invoking
+a shell, `curl` or `rm` *at all* — the failure mode is a refusal message, not a
+damaged machine. Timeout and truncation exist because free models happily emit
+servers, input prompts and 50 MB logs, and a hung pipeline is worse than a
+failed one.
+
+**Cost accepted:** some legitimate commands are refused until the user adds them
+to the allowlist, and `npm install`/`pip install` are deliberately *not*
+run — installing from a model-generated manifest is a supply-chain decision the
+human should make, not the orchestrator.
+
+## D16 — Real test output is evidence; it also gates the run (Phase 3)
+
+**Decision:** after the tester finishes, its `run_command` is actually executed
+(never the coder's, never guessed when one was named), the result is stored on
+the board as `executions`, and a failure triggers a coder fix round exactly like
+`changes_requested` does. The output is injected as `### execution` into the
+coder's fix context and the reviewer's context. If tests still fail after the
+fix loop, the pipeline stops before devops/docs and exits `5`.
+
+**Why:** before this phase the reviewer only saw *claims* in summaries — a model
+can describe passing tests that were never run, and we saw the failure mode
+live (an empty review being read as approval, D14). Executing the tester's own
+command turns "the code looks right" into "exit 0 in 1.5 s". Feeding the real
+output back means the fix round is aimed at an observed failure instead of a
+guess, which is the single biggest quality jump per token spent. Exit `5` keeps
+"your code does not run" distinguishable from "the reviewer objects" (4) and
+"the providers are down" (2), and `--no-run-tests` plus the zero-cost `run`
+command keep the human in control of when execution happens.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -201,7 +246,7 @@ produce a verdict must never look like one that approved.
 | 0 | Research, provider reality check, architecture decisions | done |
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
-| 3 | Workspace execution: generate files, run tests/builds, iterate | not started |
+| 3 | Workspace execution: generate files, run tests/builds, iterate | done |
 | 4 | FastAPI + React/Vite + Electron desktop UI streaming `events.jsonl` | not started |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

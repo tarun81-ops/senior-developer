@@ -167,3 +167,8 @@ agents:
 pipeline:
   stages: [planner, architect, coder, tester, reviewer, devops, docs]
   max_fix_iterations: 1
+  # Phase 3: write the stages' `files` into workspace/<project>/ and run the
+  # tester's command after it. Test failures feed the coder fix loop exactly
+  # like a changes_requested review. Turn off with --no-apply / --no-run-tests.
+  apply_workspace: true
+  run_tests: true

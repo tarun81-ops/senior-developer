@@ -52,11 +52,25 @@ class RequestConfig(_Base):
     stream: bool = False
 
 
+class ExecutionConfig(_Base):
+    """Phase 3: running the generated project's commands (see config/limits.yaml)."""
+
+    enabled: bool = True
+    #: executables we are willing to start; anything else is refused
+    allow: list[str] = Field(
+        default_factory=lambda: ["python", "py", "pytest", "npm", "node", "npx"]
+    )
+    timeout_seconds: float = 300.0
+    max_output_bytes: int = 20_000
+    env: dict[str, str] = Field(default_factory=dict)
+
+
 class LimitsConfig(_Base):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     request: RequestConfig = Field(default_factory=RequestConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 
 
 class RouteCandidate(_Base):
@@ -90,6 +104,10 @@ class PipelineConfig(_Base):
 
     stages: list[str] = Field(default_factory=lambda: list(DEFAULT_PIPELINE_STAGES))
     max_fix_iterations: int = 1
+    #: Phase 3: materialise the stages' `files` into workspace/<project>/
+    apply_workspace: bool = True
+    #: Phase 3: run the tester's command and feed the result back into the fix loop
+    run_tests: bool = True
 
 
 class Registry:

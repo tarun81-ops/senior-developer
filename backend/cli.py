@@ -20,6 +20,7 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from backend import __version__
@@ -30,6 +31,13 @@ from backend.core.events import find_run_events, iter_records
 from backend.core.orchestrator import Pipeline, TaskBoard
 from backend.core.provider.ratelimit import pacific_day
 from backend.core.runtime import Runtime
+from backend.core.workspace import (
+    CommandNotAllowed,
+    CommandRunner,
+    Workspace,
+    detect_test_command,
+    test_command_for,
+)
 
 EXIT_OK = 0
 EXIT_PROBLEM = 1
@@ -37,6 +45,8 @@ EXIT_RUNTIME_ERROR = 2
 EXIT_BUDGET = 3
 #: the reviewer still says changes_requested after the fix loop: human decision
 EXIT_REVIEW = 4
+#: the workspace test run is still failing after the fix loop: human decision
+EXIT_TESTS = 5
 
 
 # --------------------------------------------------------------------------- #
@@ -308,7 +318,15 @@ def cmd_build(args: argparse.Namespace) -> int:
             else None
         )
         override = _single_candidate(runtime, args.provider, args.model)
-        pipeline = Pipeline(runtime, stages=stages, override=override)
+        pipeline = Pipeline(
+            runtime,
+            stages=stages,
+            override=override,
+            project=args.project,
+            apply_workspace=False if args.no_apply else None,
+            run_tests=False if args.no_run_tests else None,
+            dry_run=args.dry_run,
+        )
         try:
             result = pipeline.run(args.goal)
         except BudgetExceeded as exc:
@@ -334,10 +352,30 @@ def cmd_build(args: argparse.Namespace) -> int:
                 )
             print("\n" + _table(["stage", "status", "target", "tokens", "notes"], rows))
             print(f"verdict    : {result.verdict or '(not reviewed)'}")
+            counts = result.files or {}
+            if counts:
+                suffix = " (dry run: nothing written)" if args.dry_run else ""
+                print(
+                    f"workspace  : {result.workspace}  "
+                    f"({counts.get('written', 0)} new, {counts.get('overwritten', 0)} updated, "
+                    f"{counts.get('unchanged', 0)} unchanged, "
+                    f"{counts.get('rejected', 0)} rejected){suffix}"
+                )
+            tests = result.tests or {}
+            if tests:
+                state = "ok" if tests.get("ok") else "FAILED"
+                print(f"tests      : {tests.get('command')} -> {state}")
+            else:
+                print("tests      : not run")
             if result.reason == "review":
                 print(
                     "review     : STILL REQUESTED CHANGES after the fix loop - "
                     "the human has to decide (board has the issues)."
+                )
+            if result.reason == "tests":
+                print(
+                    "tests      : STILL FAILING after the fix loop - the human has to "
+                    "decide (the board holds the output)."
                 )
             print(f"run budget : {runtime.budget.summary()}")
             print(f"board      : {result.board_path}")
@@ -345,10 +383,124 @@ def cmd_build(args: argparse.Namespace) -> int:
 
         if result.ok:
             return EXIT_OK
-        # reason == "review": reviewer never approved after the fix loop
-        return EXIT_REVIEW
+        # a human decision is needed; which one is in `reason`
+        return EXIT_TESTS if result.reason == "tests" else EXIT_REVIEW
     except ConfigError:
         raise  # a wrong config is a setup problem, not a runtime failure
+    finally:
+        runtime.close()
+
+
+def _board_for(settings, project: str | None):
+    """Newest run whose board matches ``project`` (or the newest board at all)."""
+    boards = sorted(
+        settings.runs_dir.glob("*/board.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in boards:
+        try:
+            board = TaskBoard.load(path)
+        except (OSError, ValueError):
+            continue
+        if project is None or board.project == project:
+            return board, path
+    return None, None
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Re-run a generated project's tests. No model calls, no quota spent."""
+    runtime = Runtime.create(echo=False)
+    try:
+        workspace = Workspace(runtime.settings.workspace_dir)
+        project = args.project
+        board, board_path = _board_for(runtime.settings, project)
+        if not project and board is not None:
+            project = board.project or None
+        if not project:
+            candidates = [path.name for path in workspace.projects()]
+            if len(candidates) == 1:
+                project = candidates[0]
+            elif candidates:
+                print(
+                    f"Several projects exist: {', '.join(candidates)}. "
+                    "Pass --project NAME.",
+                    file=sys.stderr,
+                )
+                return EXIT_PROBLEM
+            else:
+                print(
+                    'No generated project yet. Run: python -m backend.cli build "todo app"',
+                    file=sys.stderr,
+                )
+                return EXIT_PROBLEM
+
+        project_dir = workspace.project_dir(project)
+        command = args.command
+        source = "cli"
+        if not command:
+            if board is not None:
+                command, source = test_command_for(board, project_dir)
+            if not command:
+                command = detect_test_command(project_dir) or ""
+                source = "detected"
+        if not command:
+            print(
+                f"No test command: '{project}' has no tester run_command and nothing "
+                "could be detected. Pass --command.",
+                file=sys.stderr,
+            )
+            return EXIT_PROBLEM
+
+        runner = CommandRunner(runtime.registry.limits.execution)
+        runtime.bus.emit(
+            "exec.start", f"{command}  (from {source})", project=project, command=command
+        )
+        try:
+            result = runner.run(command, cwd=project_dir)
+        except CommandNotAllowed as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            runtime.bus.emit("exec.skipped", str(exc), command=command)
+            return EXIT_PROBLEM
+        if board is not None:
+            board.add_execution(result)
+        runtime.bus.emit(
+            "exec.end",
+            f"{command}: {result.summary()}",
+            project=project,
+            command=command,
+            ok=result.ok,
+            exit_code=result.exit_code,
+            duration_ms=result.duration_ms,
+        )
+
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "project": project,
+                        "cwd": str(project_dir),
+                        "board": str(board_path) if board_path else "",
+                        **result.to_dict(),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"project : {project}")
+            print(f"cwd     : {project_dir}")
+            print(f"command : {command}  (from {source})")
+            if result.stdout.strip():
+                print("\n--- stdout ---\n" + result.stdout.strip())
+            if result.stderr.strip():
+                print("\n--- stderr ---\n" + result.stderr.strip())
+            print(f"\n{result.summary()}")
+            if board_path:
+                print(f"board   : {board_path}")
+
+        return EXIT_OK if result.ok else EXIT_TESTS
+    except ConfigError:
+        raise
     finally:
         runtime.close()
 
@@ -571,10 +723,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument("--provider", help="force a single provider for every stage")
     build.add_argument("--model", help="model id for --provider")
+    build.add_argument("--project", help="workspace folder name (default: slug of the goal)")
+    build.add_argument(
+        "--no-apply", action="store_true", help="do not write files into workspace/"
+    )
+    build.add_argument(
+        "--no-run-tests", action="store_true", help="do not execute the tester's command"
+    )
+    build.add_argument(
+        "--dry-run", action="store_true", help="report what would be written, write nothing"
+    )
     build.add_argument("--json", action="store_true", help="machine-readable output only")
     build.add_argument("--quiet", action="store_true", help="hide the live event log")
     build.add_argument("--fast", action="store_true", help="shorten retry waits 10x (for demos)")
     build.set_defaults(func=cmd_build)
+
+    run = sub.add_parser(
+        "run", help="re-run a generated project's tests (no model calls, no quota)"
+    )
+    run.add_argument("--project", help="workspace project (default: the newest run's project)")
+    run.add_argument("--command", help="run this instead of the tester's run_command")
+    run.add_argument("--json", action="store_true", help="machine-readable output only")
+    run.add_argument("--quiet", action="store_true", help="reserved: run prints its own summary")
+    run.set_defaults(func=cmd_run)
 
     demo = sub.add_parser("demo", help="offline retry + backoff + failover demonstration")
     demo.add_argument("--quiet", action="store_true", help="hide the live event log")

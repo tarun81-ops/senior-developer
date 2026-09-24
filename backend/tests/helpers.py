@@ -124,54 +124,57 @@ def build_pipeline_runtime(
     max_fix_iterations: int = 1,
     stages: list[str] | None = None,
     limits: dict | None = None,
+    replies: dict[str, str] | None = None,
+    apply_workspace: bool = False,
+    run_tests: bool = False,
 ):
     """A Runtime whose seven specialist agents all run on offline mocks.
 
     ``reviewer_reply`` controls the verdict JSON (or plain text) the reviewer
     stage returns, which is how the fix-loop behaviour is exercised for free.
+    ``replies`` overrides the reply for individual agents (e.g. a coder that
+    emits a file manifest), and ``apply_workspace``/``run_tests`` switch on the
+    Phase 3 behaviour with everything rooted in ``tmp_path``.
     """
     from backend.core.config import Settings
     from backend.core.runtime import Runtime
 
-    mock_default = mock_provider("mock_default", reply=default_reply)
-    mock_reviewer = mock_provider("mock_reviewer", reply=reviewer_reply)
-    plain_chain = [{"provider": "mock_default", "model": "m"}]
-    review_chain = [{"provider": "mock_reviewer", "model": "m"}]
+    stem = PACKAGE_ROOT / "backend" / "core" / "agents" / "prompts" / "code.md"
+    prompt = str(stem)  # absolute: the temp root has no prompt files of its own
+    replies = dict(replies or {})
 
-    prompt = "backend/core/agents/prompts/code.md"
+    providers: dict[str, dict] = {}
     agents: dict[str, dict] = {}
-    for name in ("planner", "architect", "coder", "tester", "devops", "docs"):
+    for name in ("planner", "architect", "coder", "tester", "devops", "docs", "reviewer"):
+        reply = replies.get(name)
+        if reply is None:
+            reply = reviewer_reply if name == "reviewer" else default_reply
+        provider = mock_provider(f"mock_{name}", reply=reply)
+        providers[provider.name] = provider.model_dump()
         agents[name] = {
             "prompt_file": prompt,
             "temperature": 0.0,
             "max_output_tokens": 256,
-            "routing": plain_chain,
+            "routing": [{"provider": provider.name, "model": "m"}],
         }
-    agents["reviewer"] = {
-        "prompt_file": prompt,
-        "temperature": 0.0,
-        "max_output_tokens": 256,
-        "routing": review_chain,
-    }
 
     pipeline_raw = {
         "stages": stages
         or ["planner", "architect", "coder", "tester", "reviewer", "devops", "docs"],
         "max_fix_iterations": max_fix_iterations,
+        "apply_workspace": apply_workspace,
+        "run_tests": run_tests,
     }
     registry = Registry.from_dict(
-        providers_raw={
-            "providers": {
-                "mock_default": mock_default.model_dump(),
-                "mock_reviewer": mock_reviewer.model_dump(),
-            }
-        },
+        providers_raw={"providers": providers},
         agents_raw={"agents": agents, "pipeline": pipeline_raw},
         limits_raw=limits or {},
         root=PACKAGE_ROOT,
     )
 
     run_id = "pipeline-test"
+    # a throwaway project root: workspace/ and data/ stay inside tmp_path
+    root = tmp_path / "project-root"
     bus = EventBus(run_id=run_id, jsonl=JsonlWriter(tmp_path / "events.jsonl"), echo=False)
     ledger = QuotaLedger(tmp_path / "quota.json", save=False)
     budget = BudgetTracker.load(
@@ -181,7 +184,7 @@ def build_pipeline_runtime(
         tmp_path, registry, bus=bus, ledger=ledger, budget=budget, backoff_scale=0.0
     )
     return Runtime(
-        settings=Settings.from_root(PACKAGE_ROOT),  # prompt files must resolve
+        settings=Settings.from_root(root),
         registry=registry,
         ledger=ledger,
         bus=bus,

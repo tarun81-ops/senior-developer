@@ -8,13 +8,15 @@ It runs **exclusively on free-tier LLM APIs** (Gemini, Groq, OpenRouter) and is
 built so that hitting a free-tier limit is a normal, handled event — not a
 crash.
 
-> **Current state: Phase 1 + Phase 2 complete.**
+> **Current state: Phases 1–3 complete.**
 > The provider layer (routing, retries, failover, quota tracking, budgets,
-> event log) is implemented, tested and runnable from the command line, and
-> the seven specialist agents now run as a pipeline behind
+> event log) runs the seven specialist agents as a pipeline behind
 > `python -m backend.cli build`: plan → design → code → test → review
-> (with a fix loop) → devops → docs, all recorded on a shared task board.
-> Workspace execution arrives in Phase 3, the desktop UI in Phase 4.
+> (with a fix loop) → devops → docs, recorded on a shared task board.
+> **Phase 3 executes the result for real**: the stages' files are written into
+> `workspace/<project>/`, the tester's own command is run there, and failing
+> tests drive another coder round just like a review objection. The desktop UI
+> arrives in Phase 4.
 
 ---
 
@@ -65,12 +67,15 @@ From here on, `python -m backend.cli` means
 | `ask "..." --provider mock --json` | Machine-readable output. Also `--quiet`, `--agent`, `--model`, `--temperature`, `--max-tokens`, `--fast`. |
 | `build "a pomodoro timer CLI"` | **The pipeline:** planner → architect → coder → tester → reviewer → (fix loop) → devops → docs over a shared task board. Live stage events, then a board table, verdict and budget. |
 | `build "..." --stages planner,architect` | Run only part of the pipeline. Also `--provider` (force one provider), `--json`, `--quiet`, `--fast`. |
+| `build "..." --project myapp` | Name the workspace folder (default: a slug of the goal, so re-runs land in the same project). `--no-apply` skips writing files, `--no-run-tests` skips execution, `--dry-run` reports what would be written and writes nothing. |
+| `run [--project myapp]` | **Re-run a generated project's tests with no model calls and no quota used.** Uses the tester's recorded `run_command` (or `--command`, or auto-detection). Exit `0` pass, `5` failing. |
 | `demo` | Offline demonstration: first provider always answers 429, second succeeds — watch retry → backoff → cooldown → failover → success. |
 | `events -n 25` | Tails the JSONL event log of the most recent run (`--kind`, `--run-id` to filter). |
 
 Exit codes: `0` ok · `1` configuration/setup problem · `2` runtime failure
 (all providers failed) · `3` run budget exhausted (needs a human) ·
-`4` pipeline review still says `changes_requested` after the fix loop (needs a human).
+`4` pipeline review still says `changes_requested` after the fix loop (needs a human) ·
+`5` the project's tests are still failing after the fix loop (needs a human).
 
 ---
 
@@ -124,6 +129,15 @@ Key behaviours, all covered by tests:
   exit code 4 for a human. Unparseable reviewer output is treated as approval
   with a note on the board, because a formatting quirk must never deadlock a
   run (D13, D14).
+- **Generated code actually runs — inside a sandbox.** Stage manifests are
+  written to `workspace/<project>/` (atomic writes, `..`/absolute/device paths
+  rejected, project names slugified), then the tester's `run_command` is
+  executed there with `shell=False`, an executable allowlist
+  (`config/limits.yaml` → `execution.allow`), a timeout that kills the process
+  tree, and head+tail truncated output. Real failures drive another coder
+  round; if they survive, the run stops with exit code 5. `python` is pinned to
+  the interpreter running the CLI, so the generated tests see the same
+  environment (D15, D16).
 
 ### Free-tier model assignment
 
@@ -159,7 +173,8 @@ backend/
     agents/             Agent base class, JSON extractor, prompts/*.md
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
-  tests/                95 tests, no network, no keys required
+    workspace/          sandbox paths, apply (board -> files), CommandRunner
+  tests/                138 tests, no network, no keys required
 docs/DECISIONS.md       why each decision was made (D1–D14)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
@@ -171,14 +186,16 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 95 tests, ~4s, offline
+.\.venv\Scripts\python -m pytest          # 138 tests, ~9s, offline
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
-error classification (via a fake transport), agent JSON extraction, the event
-log, the task board, the pipeline (stage order, context wiring, fix loop,
-budget stops) and the CLI end-to-end against a throwaway project root. No test
-touches the network or needs an API key.
+error classification (via a fake transport), empty-completion handling, agent
+JSON extraction, the event log, the task board, the pipeline (stage order,
+context wiring, fix loop, budget stops), the workspace sandbox (path escapes,
+apply/dry-run/conflicts, command allowlist, timeouts, output truncation) and
+the CLI end-to-end against a throwaway project root. No test touches the
+network or needs an API key.
 
 ---
 
@@ -193,6 +210,9 @@ touches the network or needs an API key.
 | `BUDGET STOP` (exit 3) | A run exceeded its call/token budget. Intentional — review `data/runs/<run_id>/budget.json`, then raise the limit in `config/limits.yaml` if it was correct. |
 | A call succeeds but the answer is empty / the reviewer approves without a verdict | Free "thinking" models can spend the whole output budget on internal reasoning and return an empty message. The router treats that as a failure (`empty`), cools the model down 45 s and fails over — the tokens spent are still counted. If it happens often for one agent, raise its `max_output_tokens` in `config/agents.yaml`. |
 | Pipeline stops with exit 4 | The reviewer said `changes_requested` and still did after the fix loop. Read `data/runs/<run_id>/board.json` (the `reviewer` record lists the issues), fix by hand or re-run. |
+| Pipeline stops with exit 5 | The project's tests still fail after the fix loop. The failing command and its output are in the board (`executions`) — reproduce with `python -m backend.cli run`, or skip execution with `--no-run-tests`. |
+| `REFUSED: '<x>' is not on the execution allowlist` | The model named a command we never run (a shell, `curl`, …). Either edit that project's `run_command`, pass `--command`, or add the executable to `execution.allow` in `config/limits.yaml` if you trust it. |
+| A generated command hangs | It is killed after `execution.timeout_seconds` (default 300 s) and recorded as `timed_out: true`. Lower the timeout if you want faster feedback. |
 | Installing on Python 3.14 fails | Use 3.12 or 3.13: `py -3.12 -m venv .venv`. |
 
 **Never** paste real keys into prompts, and note that Google may use free-tier
@@ -208,8 +228,10 @@ data in prompts.
 - **Phase 2 (done)** — specialist agents + orchestrator: planner, architect,
   coder, tester, reviewer, devops, docs; shared task board (`board.json`),
   review fix loop, `build` command, 91 tests.
-- **Phase 3** — workspace execution: generate files, run `npm`/`pytest`,
-  iterate on failures, everything confined to `workspace/`.
+- **Phase 3 (done)** — workspace execution: manifests written into
+  `workspace/<project>/`, the tester's command run in a sandbox (allowlist,
+  timeout, truncated capture), test failures feeding the fix loop, `run`
+  command for zero-cost re-runs, 138 tests.
 - **Phase 4** — FastAPI backend + React/Vite + Electron desktop UI replaying
   `events.jsonl` live.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).

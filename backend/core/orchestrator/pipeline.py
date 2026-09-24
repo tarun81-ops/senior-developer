@@ -29,6 +29,16 @@ from typing import TYPE_CHECKING, Any
 
 from backend.core.errors import AgentSystemError, ConfigError
 from backend.core.orchestrator.board import TaskBoard
+from backend.core.workspace import (
+    FILE_STAGES,
+    ApplyReport,
+    CommandNotAllowed,
+    CommandRunner,
+    Workspace,
+    apply_board,
+    slugify,
+    test_command_for,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a runtime cycle
     from backend.core.runtime import Runtime
@@ -40,7 +50,8 @@ class StageSpec:
 
     ``instruction`` is the user message sent to the agent; when it is empty
     (planner) the goal itself is the message. ``needs`` names whose completed
-    board artifacts become this stage's CONTEXT.
+    board artifacts become this stage's CONTEXT, and ``wants_execution`` adds
+    the latest command output from the workspace as ``### execution``.
     """
 
     agent: str
@@ -49,6 +60,8 @@ class StageSpec:
     #: set for stages that can be re-run when the reviewer objects (coder)
     fix_instruction: str | None = None
     fix_needs: tuple[str, ...] | None = None
+    #: Phase 3: show the workspace's last command output in this stage's CONTEXT
+    wants_execution: bool = False
 
 
 STAGE_SPECS: dict[str, StageSpec] = {
@@ -60,27 +73,38 @@ STAGE_SPECS: dict[str, StageSpec] = {
     ),
     "coder": StageSpec(
         agent="coder",
-        instruction="Implement every file needed for this request. Output only the JSON file manifest.",
+        instruction=(
+            "Implement every file needed for this request. Output only the JSON "
+            "file manifest - every file you emit is written into the project folder."
+        ),
         needs=("planner", "architect"),
         fix_instruction=(
-            "The reviewer requested changes (see ### review in CONTEXT). Apply every "
-            "requested fix and re-emit the complete JSON file manifest with ALL files "
-            "(not only the changed ones)."
+            "The reviewer requested changes (see ### review in CONTEXT) and/or the "
+            "test run failed (see ### execution in CONTEXT). Apply every requested "
+            "fix and make the failing tests pass, then re-emit the complete JSON "
+            "file manifest with ALL files (not only the changed ones)."
         ),
         fix_needs=("planner", "architect", "coder", "reviewer"),
+        wants_execution=True,
     ),
     "tester": StageSpec(
         agent="tester",
-        instruction="Write the test suite for the implementation in CONTEXT.",
+        instruction=(
+            "Write the test suite for the implementation in CONTEXT. The command "
+            "you name in run_command is actually executed in the project folder, "
+            "so it must work as written on Windows PowerShell."
+        ),
         needs=("architect", "coder"),
     ),
     "reviewer": StageSpec(
         agent="reviewer",
         instruction=(
             "Review the implementation in CONTEXT against the design and tests. "
-            "Output only the verdict JSON."
+            "If ### execution is present, judge the real command output: failing "
+            "evidence beats any claim in a summary. Output only the verdict JSON."
         ),
         needs=("architect", "coder", "tester"),
+        wants_execution=True,
     ),
     "devops": StageSpec(
         agent="devops",
@@ -107,12 +131,17 @@ class PipelineResult:
     run_id: str
     goal: str
     ok: bool
-    reason: str  # "ok" | "review"
+    reason: str  # "ok" | "review" | "tests"
     stages: list[str]
     verdict: str | None
     board_path: str
     events_file: str = ""
     budget: dict[str, int] = field(default_factory=dict)
+    #: Phase 3 — where the code went and what running it said
+    project: str = ""
+    workspace: str = ""
+    files: dict[str, int] = field(default_factory=dict)
+    tests: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +154,10 @@ class PipelineResult:
             "board_path": self.board_path,
             "events_file": self.events_file,
             "budget": dict(self.budget),
+            "project": self.project,
+            "workspace": self.workspace,
+            "files": dict(self.files),
+            "tests": dict(self.tests) if self.tests else None,
         }
 
 
@@ -139,6 +172,10 @@ class Pipeline:
         max_fix_iterations: int | None = None,
         board_path: Path | str | None = None,
         override: list[tuple[Any, Any]] | None = None,
+        project: str | None = None,
+        apply_workspace: bool | None = None,
+        run_tests: bool | None = None,
+        dry_run: bool = False,
     ) -> None:
         self.runtime = runtime
         config = runtime.registry.pipeline
@@ -165,6 +202,19 @@ class Pipeline:
             else runtime.settings.runs_dir / runtime.run_id / "board.json"
         )
 
+        # -- Phase 3: workspace execution ----------------------------------
+        self.project_name = project
+        self.apply_workspace = (
+            config.apply_workspace if apply_workspace is None else apply_workspace
+        )
+        self.run_tests = config.run_tests if run_tests is None else run_tests
+        self.dry_run = dry_run
+        self.execution = runtime.registry.limits.execution
+        self.workspace = Workspace(runtime.settings.workspace_dir)
+        self.runner = CommandRunner(self.execution)
+        self._project = slugify(project) if project else ""
+        self._last_apply: ApplyReport | None = None
+
     # -- pieces -------------------------------------------------------------
     def _make_agent(self, agent_name: str):
         """Hook point: tests replace this to observe/capture agent traffic."""
@@ -181,32 +231,121 @@ class Pipeline:
         needs = spec.fix_needs if (fix and spec.fix_needs) else spec.needs
         # read BEFORE the stage overwrites its own record, so a coder fix round
         # still sees its previous artifact
-        return board.artifacts_for(needs)
+        context = board.artifacts_for(needs)
+        if spec.wants_execution:
+            block = board.execution_context()
+            if block:
+                context["execution"] = block
+        return context
+
+    # -- workspace (Phase 3) -------------------------------------------------
+    def _apply(self, board: TaskBoard) -> ApplyReport:
+        """Write the board's file manifests into ``workspace/<project>/``."""
+        if not self.apply_workspace:
+            return ApplyReport(
+                project=self._project, root=str(self.workspace.root), dry_run=True
+            )
+        report = apply_board(board, self.workspace, self._project, dry_run=self.dry_run)
+        self._last_apply = report
+        self.runtime.bus.emit(
+            "workspace.apply",
+            report.summary(),
+            project=self._project,
+            path=report.root,
+            **report.counts(),
+        )
+        if report.rejected:
+            self.runtime.bus.emit(
+                "workspace.rejected",
+                "; ".join(f"{o.path}: {o.note}" for o in report.rejected),
+                project=self._project,
+                rejected=len(report.rejected),
+            )
+        return report
+
+    def _run_tests(self, board: TaskBoard) -> None:
+        """Run the project's test command and put the result on the board."""
+        if not self.execution.enabled:
+            self.runtime.bus.emit(
+                "exec.skipped", "command execution is disabled (execution.enabled: false)"
+            )
+            return
+        project_dir = self.workspace.project_dir(self._project)
+        command, source = test_command_for(board, project_dir)
+        if not command:
+            self.runtime.bus.emit(
+                "exec.skipped",
+                "no test command: the tester did not name one and none could be detected",
+            )
+            return
+        self.runtime.bus.emit(
+            "exec.start",
+            f"{command}  (from {source})",
+            project=self._project,
+            command=command,
+            source=source,
+        )
+        try:
+            result = self.runner.run(command, cwd=project_dir)
+        except CommandNotAllowed as exc:
+            # a command we refuse to run is not a crash: skip it, loudly
+            self.runtime.bus.emit("exec.skipped", str(exc), command=command)
+            return
+        board.add_execution(result)
+        self.runtime.bus.emit(
+            "exec.end",
+            f"{command}: {result.summary()}",
+            project=self._project,
+            command=command,
+            ok=result.ok,
+            exit_code=result.exit_code,
+            duration_ms=result.duration_ms,
+            timed_out=result.timed_out,
+            truncated=result.stdout_truncated or result.stderr_truncated,
+        )
 
     # -- execution ----------------------------------------------------------
     def run(self, goal: str) -> PipelineResult:
+        self._project = self._project or slugify(goal)
         board = TaskBoard.new(
             run_id=self.runtime.run_id,
             goal=goal,
             stages=self.stages,
             agents={name: STAGE_SPECS[name].agent for name in self.stages},
+            project=self._project,
         )
         board.save(self.board_path)
         bus = self.runtime.bus
-        bus.emit("pipeline.start", goal[:160], stages=" -> ".join(self.stages))
+        bus.emit(
+            "pipeline.start",
+            goal[:160],
+            stages=" -> ".join(self.stages),
+            project=self._project,
+        )
         try:
             verdict: str | None = None
-            for stage in self.stages:
+            for index, stage in enumerate(self.stages):
+                remaining = self.stages[index + 1 :]
                 context = self._context_for(board, stage, fix=False)
                 self._execute(board, stage, goal=goal, context=context)
+                # Phase 3: real files, then real evidence
+                if stage in FILE_STAGES:
+                    self._apply(board)
+                if stage == "tester" and self.run_tests:
+                    self._run_tests(board)
                 if stage == "reviewer":
                     verdict = self._review_loop(board, goal)
-                    if verdict == "changes_requested":
-                        # out of fix iterations: a human has to decide (D8)
-                        board.skip_rest(after="reviewer")
-                        return self._finish(
-                            board, ok=False, reason="review", verdict=verdict
+                stop = self._stop_reason(board, verdict, remaining)
+                if stop:
+                    if stop == "tests":
+                        last = board.last_execution or {}
+                        self.runtime.bus.emit(
+                            "pipeline.unresolved_tests",
+                            f"test run still failing ({last.get('command')}); "
+                            "stopping for a human",
                         )
+                    board.skip_rest(after=stage)
+                    return self._finish(board, ok=False, reason=stop, verdict=verdict)
             return self._finish(board, ok=True, reason="ok", verdict=verdict)
         except AgentSystemError as exc:
             failed = board.failed_stage
@@ -280,19 +419,17 @@ class Pipeline:
         )
 
     def _review_loop(self, board: TaskBoard, goal: str) -> str | None:
-        """Run coder fix iterations while the reviewer keeps objecting."""
+        """Run coder fix iterations while the reviewer objects or tests fail."""
         verdict = self._verdict(board)
         iterations = 0
-        while (
-            verdict == "changes_requested"
-            and iterations < self.max_fix_iterations
-            and "coder" in self.stages
-        ):
+        while iterations < self.max_fix_iterations and "coder" in self.stages:
+            reason = self._fix_reason(board, verdict)
+            if reason is None:
+                break
             iterations += 1
             self.runtime.bus.emit(
                 "pipeline.fix",
-                f"review requested changes; fix iteration "
-                f"{iterations}/{self.max_fix_iterations}",
+                f"{reason}; fix iteration {iterations}/{self.max_fix_iterations}",
             )
             self._execute(
                 board,
@@ -301,6 +438,11 @@ class Pipeline:
                 context=self._context_for(board, "coder", fix=True),
                 fix=True,
             )
+            # the new code has to be on disk and re-tested before the reviewer
+            # is asked again: evidence, not claims
+            self._apply(board)
+            if self.run_tests:
+                self._run_tests(board)
             self._execute(
                 board,
                 "reviewer",
@@ -308,18 +450,45 @@ class Pipeline:
                 context=self._context_for(board, "reviewer", fix=False),
             )
             verdict = self._verdict(board)
-        if verdict == "changes_requested":
-            if "coder" not in self.stages:
-                detail = "but the coder stage is not part of this run"
-            elif self.max_fix_iterations == 0:
-                detail = "and the fix loop is disabled (max_fix_iterations: 0)"
-            else:
-                detail = f"after {iterations} fix iteration(s)"
-            self.runtime.bus.emit(
-                "pipeline.unresolved_review",
-                f"reviewer requests changes {detail}; stopping for a human",
-            )
+        self._emit_unresolved_review(board, verdict, iterations)
         return verdict
+
+    def _fix_reason(self, board: TaskBoard, verdict: str | None) -> str | None:
+        """Why another coder round is warranted, or ``None`` if it is not."""
+        if verdict == "changes_requested":
+            return "review requested changes"
+        if self.run_tests and board.tests_failed:
+            return "the test run failed"
+        return None
+
+    def _stop_reason(
+        self, board: TaskBoard, verdict: str | None, remaining: list[str]
+    ) -> str | None:
+        """Should the pipeline stop before the remaining stages? (D8, D14, D15)"""
+        if verdict == "changes_requested":
+            return "review"
+        if self.run_tests and board.tests_failed:
+            # a fix round may still be possible: let the loop try first
+            if "reviewer" in remaining or "coder" in remaining:
+                return None
+            return "tests"
+        return None
+
+    def _emit_unresolved_review(
+        self, board: TaskBoard, verdict: str | None, iterations: int
+    ) -> None:
+        if verdict != "changes_requested":
+            return
+        if "coder" not in self.stages:
+            detail = "but the coder stage is not part of this run"
+        elif self.max_fix_iterations == 0:
+            detail = "and the fix loop is disabled (max_fix_iterations: 0)"
+        else:
+            detail = f"after {iterations} fix iteration(s)"
+        self.runtime.bus.emit(
+            "pipeline.unresolved_review",
+            f"reviewer requests changes {detail}; stopping for a human",
+        )
 
     @staticmethod
     def _verdict(board: TaskBoard) -> str | None:
@@ -356,6 +525,10 @@ class Pipeline:
             board_path=str(saved),
             events_file=str(self.runtime.events_path),
             budget={"calls": budget.calls, "tokens": budget.tokens},
+            project=board.project,
+            workspace=str(self.workspace.project_dir(self._project, create=False)),
+            files=(self._last_apply.counts() if self._last_apply else {}),
+            tests=board.last_execution,
         )
         self.runtime.bus.emit(
             "pipeline.end",
