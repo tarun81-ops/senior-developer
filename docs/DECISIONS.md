@@ -151,13 +151,56 @@ CI setups that keep secrets only in the process environment are unaffected
 
 ---
 
+## D13 — Shared task board is a JSON file, not a framework (Phase 2)
+
+**Decision:** stage outputs and hand-offs live on a `TaskBoard` persisted to
+`data/runs/<run_id>/board.json` (atomic write, same pattern as `budget.json`).
+
+**Why:** D2 committed us to owning the hand-off protocol. A file is the
+simplest thing that serves all three consumers — the orchestrator (context for
+the next stage), the CLI (final table), the Phase 4 UI (live state) — and it
+survives crashes for free: the last flushed state *is* the truth. Each stage
+declares in code which predecessors' artifacts it needs; nothing is passed
+implicitly.
+
+## D14 — Review gate: fix loop with a hard stop, tolerant verdict parsing (Phase 2)
+
+**Decision:** the reviewer emits `approve` / `changes_requested`. On
+`changes_requested` the coder re-runs with the feedback and the reviewer
+re-checks, at most `pipeline.max_fix_iterations` times (default 1). If the
+reviewer still objects, the pipeline stops **before** devops/docs and the CLI
+exits with a new code `4` — a human decides. Unparseable or unknown-format
+reviewer output is treated as approval-with-a-note on the board.
+
+**Why:** the gate must be able to say no (rubber-stamping defeats D5's
+different-family reviewer), but a free model's formatting quirk must never
+deadlock the run — a stuck pipeline and a broken JSON fence look identical to
+a retry loop, and the fix loop alone can burn a day of quota. Stop-forever
+only for real disagreement; tolerate-forever with a visible note for format
+noise. Exit code 4 keeps "needs your judgement" distinguishable from
+"configuration wrong" (1), "providers dead" (2) and "budget hit" (3).
+
+**Amendment (found by running it live):** the first-choice reviewer
+(`openrouter/qwen/qwen3.8-27b:free`, a "thinking" model) once returned HTTP 200
+with **no content at all** — 4096 output tokens and 108 s spent on internal
+reasoning, an empty `content` field. Phase 2 originally accepted that as
+"unparseable, therefore approval", which is exactly the silent fake-approval
+D14 exists to prevent. The router now has an `empty` failure kind: count the
+request and its tokens (they were really spent), put the model on a short
+45 s cooldown, and **fail over immediately** (no retry — the failure is the
+model's output budget, not a transient error). If every provider returns
+empty, the stage fails like any other provider outage. A reviewer that cannot
+produce a verdict must never look like one that approved.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | Research, provider reality check, architecture decisions | done |
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
-| 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | approved, not started |
+| 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | not started |
 | 4 | FastAPI + React/Vite + Electron desktop UI streaming `events.jsonl` | not started |
 | 5 | Deploy generated apps (Vercel + Render) | not started |

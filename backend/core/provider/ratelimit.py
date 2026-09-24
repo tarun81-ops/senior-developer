@@ -277,6 +277,7 @@ COOLDOWN_FIELDS: dict[str, str] = {
     "credits": "on_credits_seconds",
     "server": "on_server_error_seconds",
     "network": "on_network_error_seconds",
+    "empty": "on_empty_seconds",
 }
 
 

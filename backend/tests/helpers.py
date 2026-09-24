@@ -114,3 +114,78 @@ def budget_for(tmp_path: Path, **overrides) -> BudgetTracker:
 
 def event_kinds(records: list) -> list[str]:
     return [record["kind"] for record in records]
+
+
+def build_pipeline_runtime(
+    tmp_path: Path,
+    *,
+    reviewer_reply: str = '{"verdict": "approve"}',
+    default_reply: str = "mock reply",
+    max_fix_iterations: int = 1,
+    stages: list[str] | None = None,
+    limits: dict | None = None,
+):
+    """A Runtime whose seven specialist agents all run on offline mocks.
+
+    ``reviewer_reply`` controls the verdict JSON (or plain text) the reviewer
+    stage returns, which is how the fix-loop behaviour is exercised for free.
+    """
+    from backend.core.config import Settings
+    from backend.core.runtime import Runtime
+
+    mock_default = mock_provider("mock_default", reply=default_reply)
+    mock_reviewer = mock_provider("mock_reviewer", reply=reviewer_reply)
+    plain_chain = [{"provider": "mock_default", "model": "m"}]
+    review_chain = [{"provider": "mock_reviewer", "model": "m"}]
+
+    prompt = "backend/core/agents/prompts/code.md"
+    agents: dict[str, dict] = {}
+    for name in ("planner", "architect", "coder", "tester", "devops", "docs"):
+        agents[name] = {
+            "prompt_file": prompt,
+            "temperature": 0.0,
+            "max_output_tokens": 256,
+            "routing": plain_chain,
+        }
+    agents["reviewer"] = {
+        "prompt_file": prompt,
+        "temperature": 0.0,
+        "max_output_tokens": 256,
+        "routing": review_chain,
+    }
+
+    pipeline_raw = {
+        "stages": stages
+        or ["planner", "architect", "coder", "tester", "reviewer", "devops", "docs"],
+        "max_fix_iterations": max_fix_iterations,
+    }
+    registry = Registry.from_dict(
+        providers_raw={
+            "providers": {
+                "mock_default": mock_default.model_dump(),
+                "mock_reviewer": mock_reviewer.model_dump(),
+            }
+        },
+        agents_raw={"agents": agents, "pipeline": pipeline_raw},
+        limits_raw=limits or {},
+        root=PACKAGE_ROOT,
+    )
+
+    run_id = "pipeline-test"
+    bus = EventBus(run_id=run_id, jsonl=JsonlWriter(tmp_path / "events.jsonl"), echo=False)
+    ledger = QuotaLedger(tmp_path / "quota.json", save=False)
+    budget = BudgetTracker.load(
+        registry.limits.budget, run_id=run_id, path=tmp_path / "budget.json"
+    )
+    router, bus = build_router(
+        tmp_path, registry, bus=bus, ledger=ledger, budget=budget, backoff_scale=0.0
+    )
+    return Runtime(
+        settings=Settings.from_root(PACKAGE_ROOT),  # prompt files must resolve
+        registry=registry,
+        ledger=ledger,
+        bus=bus,
+        budget=budget,
+        router=router,
+    )
+

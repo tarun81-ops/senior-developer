@@ -19,12 +19,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from backend.core.errors import AllProvidersFailed, ConfigError, ProviderError
+from backend.core.errors import (
+    AllProvidersFailed,
+    ConfigError,
+    EmptyResponseError,
+    ProviderError,
+)
 from backend.core.events import EventBus
 from backend.core.orchestrator.budgets import BudgetTracker
 from backend.core.provider.client import OpenAICompatClient
 from backend.core.provider.ratelimit import QuotaLedger, backoff_delay, cooldown_seconds
-from backend.core.provider.registry import AgentConfig, Registry
+from backend.core.provider.registry import AgentConfig, Registry, RetryConfig
 from backend.core.provider.schemas import ChatMessage, Completion, ModelSpec, ProviderSpec
 
 Candidate = tuple[ProviderSpec, ModelSpec]
@@ -235,29 +240,64 @@ class ProviderRouter:
                     max_attempts=max_attempts,
                     cooldowns=cooldowns,
                 )
-                if exc.retryable and attempt < max_attempts:
-                    delay = backoff_delay(
-                        attempt,
-                        retry,
-                        retry_after=exc.retry_after,
-                        scale=self.options.backoff_scale,
-                    )
-                    if delay > 0:
-                        self.bus.emit(
-                            "provider.retry",
-                            f"waiting {delay:.1f}s before attempt {attempt + 1}/{max_attempts}",
-                            agent=agent.name,
-                            provider=spec.name,
-                            model=model.id,
-                            delay_seconds=round(delay, 2),
-                            error_kind=exc.kind,
-                        )
-                        self.options.sleep(delay)
+                if self._retry_or_stop(
+                    exc,
+                    agent=agent,
+                    spec=spec,
+                    model=model,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    retry=retry,
+                ):
                     continue
                 return None
 
             latency_ms = raw.latency_ms or int((time.perf_counter() - started) * 1000)
             usage = raw.usage
+            if not raw.text.strip():
+                # An empty answer is not an answer: "thinking" models can spend
+                # the whole output budget on internal reasoning and return an
+                # empty `content` (observed live on OpenRouter qwen3.8: 4096
+                # output tokens, zero text, 108 s). The tokens WERE spent, so
+                # they stay on the ledger and the budget - counted ONCE here,
+                # which is why _emit_provider_error skips its own request slot.
+                self.ledger.record_attempt(quota_key, tokens=usage.total_tokens)
+                if self.budget is not None:
+                    self.budget.add_usage(
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=usage.completion_tokens,
+                    )
+                empty = EmptyResponseError(
+                    "empty completion "
+                    f"(finish_reason={raw.finish_reason or 'unknown'}, "
+                    f"{usage.completion_tokens} output tokens spent)",
+                    provider=spec.name,
+                    model=model.id,
+                    status=200,
+                )
+                self._emit_provider_error(
+                    empty,
+                    spec=spec,
+                    model=model,
+                    quota_key=quota_key,
+                    report=report,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    cooldowns=cooldowns,
+                    record_request=False,
+                )
+                if self._retry_or_stop(
+                    empty,
+                    agent=agent,
+                    spec=spec,
+                    model=model,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    retry=retry,
+                ):
+                    continue
+                return None
+
             self.ledger.record_attempt(quota_key, tokens=usage.total_tokens)
             if self.budget is not None:
                 self.budget.add_usage(
@@ -292,6 +332,45 @@ class ProviderRouter:
             )
         return None
 
+    def _retry_or_stop(
+        self,
+        exc: ProviderError,
+        *,
+        agent: AgentConfig,
+        spec: ProviderSpec,
+        model: ModelSpec,
+        attempt: int,
+        max_attempts: int,
+        retry: RetryConfig,
+    ) -> bool:
+        """True when this candidate deserves another attempt after ``exc``.
+
+        Shared by the HTTP-failure path and the empty-completion path, so both
+        retry with the same exponential backoff and emit the same event.
+        """
+        if not exc.retryable or attempt >= max_attempts:
+            return False
+        if exc.kind == "empty":
+            # Not transient: the model's output budget went to internal
+            # reasoning. Retrying the same model just burns more tokens, so
+            # fail over to the next provider immediately.
+            return False
+        delay = backoff_delay(
+            attempt, retry, retry_after=exc.retry_after, scale=self.options.backoff_scale
+        )
+        if delay > 0:
+            self.bus.emit(
+                "provider.retry",
+                f"waiting {delay:.1f}s before attempt {attempt + 1}/{max_attempts}",
+                agent=agent.name,
+                provider=spec.name,
+                model=model.id,
+                delay_seconds=round(delay, 2),
+                error_kind=exc.kind,
+            )
+            self.options.sleep(delay)
+        return True
+
     def _emit_provider_error(
         self,
         exc: ProviderError,
@@ -303,10 +382,13 @@ class ProviderRouter:
         attempt: int,
         max_attempts: int,
         cooldowns,
+        record_request: bool = True,
     ) -> None:
         # A failed request still consumes a request slot on the free tier, so it
-        # is counted against our own RPM/RPD ledger too.
-        self.ledger.record_attempt(quota_key)
+        # is counted against our own RPM/RPD ledger too - unless the caller
+        # already accounted for this call (the empty-completion path does).
+        if record_request:
+            self.ledger.record_attempt(quota_key)
         seconds = cooldown_seconds(exc.kind, cooldowns)
         if seconds > 0:
             self.ledger.set_cooldown(spec.name, reason=exc.kind, seconds=seconds)

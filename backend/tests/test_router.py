@@ -163,3 +163,56 @@ def test_events_are_written_to_the_run_log(tmp_path) -> None:
     assert {r["run_id"] for r in records} == {"r1"}
     assert event_kinds(records)[:2] == ["provider.attempt", "llm.response"]
 
+
+
+
+def test_empty_completion_is_retried_then_fails_over(tmp_path) -> None:
+    # A thinking model can return HTTP 200 with no content at all. An empty
+    # answer is not an answer: fail over at once and cool the model down.
+    silent = mock_provider("silent", reply="")
+    talker = mock_provider("talker", reply="a real answer")
+    registry = build_registry([silent, talker])
+    router, bus = build_router(tmp_path, registry)
+
+    completion = router.complete("tester_agent", MESSAGES)
+
+    assert completion.provider == "talker"
+    assert completion.text == "a real answer"
+    assert completion.failed_over is True
+    # One attempt only: an empty completion is not transient, so the router
+    # fails over at once instead of burning the same model output budget again.
+    assert completion.attempts == [
+        "silent/m#1 -> empty",
+        "talker/m#1 -> ok",
+    ]
+    assert router.ledger.cooldown_reason("silent") == "empty"
+    assert router.ledger.cooldown_remaining("silent") == pytest.approx(45, abs=2)
+    kinds = event_kinds(bus.jsonl.read_all())
+    assert kinds.count("provider.error") == 1
+    assert kinds.count("provider.retry") == 0
+
+
+def test_all_empty_completions_raise_all_providers_failed(tmp_path) -> None:
+    registry = build_registry([mock_provider("silent", reply="")])
+    router, _bus = build_router(tmp_path, registry)
+
+    with pytest.raises(AllProvidersFailed) as excinfo:
+        router.complete("tester_agent", MESSAGES)
+
+    assert "empty" in str(excinfo.value)
+
+
+def test_tokens_from_an_empty_completion_are_still_counted(tmp_path) -> None:
+    # The tokens WERE spent upstream, so they must stay on the ledger and the
+    # run budget - otherwise the next request would be a surprise 429.
+    silent = mock_provider("silent", reply="")
+    talker = mock_provider("talker", reply="ok")
+    registry = build_registry([silent, talker])
+    budget = budget_for(tmp_path)
+    router, _bus = build_router(tmp_path, registry, budget=budget)
+
+    router.complete("tester_agent", MESSAGES)
+
+    assert budget.state.tokens > 0
+    assert budget.state.completion_tokens > 0
+    assert router.ledger.usage("silent:m").requests == 1

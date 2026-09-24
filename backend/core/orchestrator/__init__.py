@@ -1,5 +1,7 @@
-"""Orchestrator pieces. Phase 1 only needs the run budget guard."""
+"""Orchestrator: the shared task board and the stage pipeline."""
 
+from backend.core.orchestrator.board import StageRecord, TaskBoard
 from backend.core.orchestrator.budgets import BudgetTracker
+from backend.core.orchestrator.pipeline import Pipeline, PipelineResult, STAGE_SPECS
 
-__all__ = ["BudgetTracker"]
+__all__ = ["BudgetTracker", "Pipeline", "PipelineResult", "STAGE_SPECS", "StageRecord", "TaskBoard"]

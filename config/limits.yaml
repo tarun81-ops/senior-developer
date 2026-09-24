@@ -20,6 +20,10 @@ cooldown:
   on_credits_seconds: 3600       # "no credits": retrying this hour is pointless
   on_server_error_seconds: 30
   on_network_error_seconds: 20
+  # HTTP 200 but no content: "thinking" free models sometimes spend the whole
+  # output budget on internal reasoning and return an empty message. Short
+  # cooldown — we would rather fail over to the next provider quickly.
+  on_empty_seconds: 45
 
 budget:
   # Per run (one CLI command): refuse to keep going past these ceilings and ask

@@ -35,6 +35,10 @@ class CooldownConfig(_Base):
     on_credits_seconds: int = 3600
     on_server_error_seconds: int = 30
     on_network_error_seconds: int = 20
+    #: HTTP 200 with an empty completion (thinking models burn the budget on
+    #: reasoning). Short cooldown: it usually works on the next try or the next
+    #: request, and we would rather fail over than wait long.
+    on_empty_seconds: int = 45
 
 
 class BudgetConfig(_Base):
@@ -77,6 +81,17 @@ class AgentConfig(_Base):
         return path if path.is_absolute() else (root / path)
 
 
+#: Phase 2 default pipeline. Only used when agents.yaml has no ``pipeline:`` section.
+DEFAULT_PIPELINE_STAGES = ["planner", "architect", "coder", "tester", "reviewer", "devops", "docs"]
+
+
+class PipelineConfig(_Base):
+    """Stage order and review policy for the orchestrator (config, not code)."""
+
+    stages: list[str] = Field(default_factory=lambda: list(DEFAULT_PIPELINE_STAGES))
+    max_fix_iterations: int = 1
+
+
 class Registry:
     """In-memory view of all configuration."""
 
@@ -87,11 +102,13 @@ class Registry:
         agents: dict[str, AgentConfig],
         limits: LimitsConfig,
         root: Path,
+        pipeline: PipelineConfig | None = None,
     ) -> None:
         self.providers = providers
         self.agents = agents
         self.limits = limits
         self.root = Path(root)
+        self.pipeline = pipeline or PipelineConfig()
 
     # -- construction -------------------------------------------------------
     @classmethod
@@ -151,7 +168,14 @@ class Registry:
             agents[name] = agent
 
         limits = LimitsConfig.model_validate(limits_raw or {})
-        return cls(providers=providers, agents=agents, limits=limits, root=Path(root))
+        pipeline = PipelineConfig.model_validate(agents_raw.get("pipeline") or {})
+        return cls(
+            providers=providers,
+            agents=agents,
+            limits=limits,
+            root=Path(root),
+            pipeline=pipeline,
+        )
 
     # -- lookups ------------------------------------------------------------
     def provider(self, name: str) -> ProviderSpec:

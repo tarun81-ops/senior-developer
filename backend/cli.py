@@ -5,6 +5,8 @@
     python -m backend.cli models --provider groq --live
     python -m backend.cli ask "explain git rebase in 3 lines"
     python -m backend.cli ask "..." --provider groq --model openai/gpt-oss-120b
+    python -m backend.cli build "a pomodoro timer CLI in Python"   # full specialist pipeline
+    python -m backend.cli build "..." --stages planner,architect   # part of it
     python -m backend.cli demo                 # offline retry + failover demo
     python -m backend.cli events -n 25         # tail the last run's log
 
@@ -25,6 +27,7 @@ from backend.core.agents import Agent
 from backend.core.config import get_settings, load_env
 from backend.core.errors import AgentSystemError, BudgetExceeded, ConfigError
 from backend.core.events import find_run_events, iter_records
+from backend.core.orchestrator import Pipeline, TaskBoard
 from backend.core.provider.ratelimit import pacific_day
 from backend.core.runtime import Runtime
 
@@ -32,6 +35,8 @@ EXIT_OK = 0
 EXIT_PROBLEM = 1
 EXIT_RUNTIME_ERROR = 2
 EXIT_BUDGET = 3
+#: the reviewer still says changes_requested after the fix loop: human decision
+EXIT_REVIEW = 4
 
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +295,64 @@ def cmd_models(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    """Run the specialist pipeline: plan -> design -> code -> test -> review..."""
+    runtime = Runtime.create(
+        echo=not (args.quiet or args.json),
+        backoff_scale=0.1 if args.fast else 1.0,
+    )
+    try:
+        stages = (
+            [s.strip() for s in args.stages.split(",") if s.strip()]
+            if args.stages
+            else None
+        )
+        override = _single_candidate(runtime, args.provider, args.model)
+        pipeline = Pipeline(runtime, stages=stages, override=override)
+        try:
+            result = pipeline.run(args.goal)
+        except BudgetExceeded as exc:
+            print(f"\nBUDGET STOP: {exc}", file=sys.stderr)
+            print("A human has to decide what happens next (that is by design).", file=sys.stderr)
+            return EXIT_BUDGET
+
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2))
+        else:
+            board = TaskBoard.load(result.board_path)
+            rows = []
+            for record in board.rows():
+                detail = "; ".join(record["notes"]) or record["error"]
+                rows.append(
+                    [
+                        record["stage"],
+                        record["status"],
+                        record["target"] or "-",
+                        record["tokens"],
+                        detail[:60],
+                    ]
+                )
+            print("\n" + _table(["stage", "status", "target", "tokens", "notes"], rows))
+            print(f"verdict    : {result.verdict or '(not reviewed)'}")
+            if result.reason == "review":
+                print(
+                    "review     : STILL REQUESTED CHANGES after the fix loop - "
+                    "the human has to decide (board has the issues)."
+                )
+            print(f"run budget : {runtime.budget.summary()}")
+            print(f"board      : {result.board_path}")
+            print(f"events     : {result.events_file}")
+
+        if result.ok:
+            return EXIT_OK
+        # reason == "review": reviewer never approved after the fix loop
+        return EXIT_REVIEW
+    except ConfigError:
+        raise  # a wrong config is a setup problem, not a runtime failure
+    finally:
+        runtime.close()
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     runtime = Runtime.create(
         echo=not (args.quiet or args.json),
@@ -496,6 +559,22 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["rate_limit", "auth", "credits", "server", "network", "model_not_found"],
     )
     ask.set_defaults(func=cmd_ask)
+
+    build = sub.add_parser(
+        "build",
+        help="run the specialist pipeline: plan, design, code, test, review, devops, docs",
+    )
+    build.add_argument("goal", help="plain-English description of what to build")
+    build.add_argument(
+        "--stages",
+        help="comma-separated subset of stages, e.g. planner,architect",
+    )
+    build.add_argument("--provider", help="force a single provider for every stage")
+    build.add_argument("--model", help="model id for --provider")
+    build.add_argument("--json", action="store_true", help="machine-readable output only")
+    build.add_argument("--quiet", action="store_true", help="hide the live event log")
+    build.add_argument("--fast", action="store_true", help="shorten retry waits 10x (for demos)")
+    build.set_defaults(func=cmd_build)
 
     demo = sub.add_parser("demo", help="offline retry + backoff + failover demonstration")
     demo.add_argument("--quiet", action="store_true", help="hide the live event log")

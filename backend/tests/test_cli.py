@@ -131,6 +131,115 @@ def test_events_command_tails_the_last_run(
     assert "llm.response" in output
 
 
+def test_build_runs_the_full_pipeline_offline(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    import json
+
+    exit_code = cli.main(
+        ["build", "a todo app", "--provider", "mock", "--quiet", "--json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == cli.EXIT_OK
+    assert payload["ok"] is True
+    assert payload["stages"] == [
+        "planner",
+        "architect",
+        "coder",
+        "tester",
+        "reviewer",
+        "devops",
+        "docs",
+    ]
+
+    boards = list((fake_root / "data" / "runs").glob("*/board.json"))
+    assert len(boards) == 1
+    board = json.loads(boards[0].read_text(encoding="utf-8"))
+    for stage in board["order"]:
+        assert board["records"][stage]["status"] == "done"
+
+    events = next(
+        (fake_root / "data" / "runs").glob("*/events.jsonl")
+    ).read_text(encoding="utf-8")
+    assert "pipeline.start" in events
+    assert "stage.end" in events
+    assert "pipeline.end" in events
+
+
+def test_build_stage_subset_runs_only_those_stages(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    import json
+
+    exit_code = cli.main(
+        ["build", "goal", "--stages", "planner", "--provider", "mock", "--quiet", "--json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == cli.EXIT_OK
+    assert payload["stages"] == ["planner"]
+    assert payload["ok"] is True
+
+
+def test_build_unknown_stage_is_a_config_error(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    exit_code = cli.main(["build", "goal", "--stages", "planner,nope"])
+    captured = capsys.readouterr()
+
+    assert exit_code == cli.EXIT_PROBLEM
+    assert "CONFIG ERROR" in captured.err
+    assert "nope" in captured.err
+
+
+def test_build_provider_failure_stops_with_runtime_error(
+    capsys: pytest.CaptureFixture[str], fake_root: Path
+) -> None:
+    import json
+
+    exit_code = cli.main(
+        ["build", "goal", "--provider", "mock_flaky", "--fast", "--quiet"]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == cli.EXIT_RUNTIME_ERROR
+    assert "all providers failed" in captured.err.lower()
+
+    board_path = next((fake_root / "data" / "runs").glob("*/board.json"))
+    board = json.loads(board_path.read_text(encoding="utf-8"))
+    assert board["records"]["planner"]["status"] == "failed"
+    assert board["records"]["architect"]["status"] == "skipped"
+
+
+def test_build_unresolved_review_returns_exit_code_review(
+    capsys: pytest.CaptureFixture[str],
+    fake_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.core.orchestrator import PipelineResult
+
+    class FakePipeline:
+        def __init__(self, runtime, **kwargs) -> None:
+            pass
+
+        def run(self, goal: str) -> PipelineResult:
+            return PipelineResult(
+                run_id="fake",
+                goal=goal,
+                ok=False,
+                reason="review",
+                stages=["planner"],
+                verdict="changes_requested",
+                board_path="unused.json",
+            )
+
+    monkeypatch.setattr(cli, "Pipeline", FakePipeline)
+    exit_code = cli.main(["build", "whatever", "--quiet", "--json"])
+
+    assert exit_code == cli.EXIT_REVIEW
+
+
 def test_unknown_agent_is_a_config_error(
     capsys: pytest.CaptureFixture[str], fake_root: Path
 ) -> None:

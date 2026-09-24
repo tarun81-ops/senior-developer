@@ -8,10 +8,13 @@ It runs **exclusively on free-tier LLM APIs** (Gemini, Groq, OpenRouter) and is
 built so that hitting a free-tier limit is a normal, handled event — not a
 crash.
 
-> **Current state: Phase 1 (foundation) complete.**
+> **Current state: Phase 1 + Phase 2 complete.**
 > The provider layer (routing, retries, failover, quota tracking, budgets,
-> event log) is implemented, tested and runnable from the command line.
-> The specialist agents arrive in Phase 2, the desktop UI in Phase 4.
+> event log) is implemented, tested and runnable from the command line, and
+> the seven specialist agents now run as a pipeline behind
+> `python -m backend.cli build`: plan → design → code → test → review
+> (with a fix loop) → devops → docs, all recorded on a shared task board.
+> Workspace execution arrives in Phase 3, the desktop UI in Phase 4.
 
 ---
 
@@ -60,11 +63,14 @@ From here on, `python -m backend.cli` means
 | `models --provider groq --live` | Models from config, or from the provider itself with `--live`. Add `--free-only` for `:free` OpenRouter ids. |
 | `ask "build me a todo app"` | One prompt to one agent: live event log, answer, routing report. |
 | `ask "..." --provider mock --json` | Machine-readable output. Also `--quiet`, `--agent`, `--model`, `--temperature`, `--max-tokens`, `--fast`. |
+| `build "a pomodoro timer CLI"` | **The pipeline:** planner → architect → coder → tester → reviewer → (fix loop) → devops → docs over a shared task board. Live stage events, then a board table, verdict and budget. |
+| `build "..." --stages planner,architect` | Run only part of the pipeline. Also `--provider` (force one provider), `--json`, `--quiet`, `--fast`. |
 | `demo` | Offline demonstration: first provider always answers 429, second succeeds — watch retry → backoff → cooldown → failover → success. |
 | `events -n 25` | Tails the JSONL event log of the most recent run (`--kind`, `--run-id` to filter). |
 
 Exit codes: `0` ok · `1` configuration/setup problem · `2` runtime failure
-(all providers failed) · `3` run budget exhausted (needs a human).
+(all providers failed) · `3` run budget exhausted (needs a human) ·
+`4` pipeline review still says `changes_requested` after the fix loop (needs a human).
 
 ---
 
@@ -107,6 +113,17 @@ Key behaviours, all covered by tests:
 - **Budget guard.** Each run counts calls and tokens against
   `config/limits.yaml`; exceeding it raises `BudgetExceeded` and stops for a
   human instead of silently burning free quota.
+- **The pipeline is config, too.** Stage order and the fix-loop limit live in
+  `config/agents.yaml` under `pipeline:`; each stage's model comes from its
+  agent entry. Changing the process is a YAML edit. Stage outputs are written
+  to `data/runs/<run_id>/board.json` after every transition, so the next stage
+  (and the Phase 4 UI) always know exactly where the run is.
+- **The reviewer can say no — once per fix round, then it stops.**
+  `changes_requested` re-runs coder with the feedback, bounded by
+  `max_fix_iterations`; if the reviewer still objects the pipeline stops with
+  exit code 4 for a human. Unparseable reviewer output is treated as approval
+  with a note on the board, because a formatting quirk must never deadlock a
+  run (D13, D14).
 
 ### Free-tier model assignment
 
@@ -132,7 +149,7 @@ and update `config/providers.yaml` / `config/agents.yaml` if an id 404s.
 ```
 config/                 providers.yaml, agents.yaml, limits.yaml (all config lives here)
 backend/
-  cli.py                doctor / providers / models / ask / demo / events
+  cli.py                doctor / providers / models / ask / build / demo / events
   core/
     config.py           Settings + .env loading
     errors.py           error hierarchy (retryable vs not)
@@ -141,9 +158,9 @@ backend/
     provider/           schemas, registry, quota ledger, HTTP client, router
     agents/             Agent base class, JSON extractor, prompts/*.md
     events/             EventBus + JSONL writer
-    orchestrator/       BudgetTracker (Phase 2 adds the orchestrator here)
-  tests/                77 tests, no network, no keys required
-docs/DECISIONS.md       why each Phase 0 decision was made
+    orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
+  tests/                95 tests, no network, no keys required
+docs/DECISIONS.md       why each decision was made (D1–D14)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -154,13 +171,14 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 77 tests, ~3s, offline
+.\.venv\Scripts\python -m pytest          # 95 tests, ~4s, offline
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
 error classification (via a fake transport), agent JSON extraction, the event
-log, and the CLI end-to-end against a throwaway project root. No test touches
-the network or needs an API key.
+log, the task board, the pipeline (stage order, context wiring, fix loop,
+budget stops) and the CLI end-to-end against a throwaway project root. No test
+touches the network or needs an API key.
 
 ---
 
@@ -173,6 +191,8 @@ the network or needs an API key.
 | `No endpoints found for <model>` / 404 | Model id retired. Re-run `models --live` and update the YAML. |
 | Gemini daily quota exhausted | Free tier resets at **midnight Pacific**. The ledger knows this and shows the reset boundary in `providers`. |
 | `BUDGET STOP` (exit 3) | A run exceeded its call/token budget. Intentional — review `data/runs/<run_id>/budget.json`, then raise the limit in `config/limits.yaml` if it was correct. |
+| A call succeeds but the answer is empty / the reviewer approves without a verdict | Free "thinking" models can spend the whole output budget on internal reasoning and return an empty message. The router treats that as a failure (`empty`), cools the model down 45 s and fails over — the tokens spent are still counted. If it happens often for one agent, raise its `max_output_tokens` in `config/agents.yaml`. |
+| Pipeline stops with exit 4 | The reviewer said `changes_requested` and still did after the fix loop. Read `data/runs/<run_id>/board.json` (the `reviewer` record lists the issues), fix by hand or re-run. |
 | Installing on Python 3.14 fails | Use 3.12 or 3.13: `py -3.12 -m venv .venv`. |
 
 **Never** paste real keys into prompts, and note that Google may use free-tier
@@ -184,9 +204,10 @@ data in prompts.
 ## Roadmap
 
 - **Phase 1 (done)** — provider layer: config-driven routing, retries,
-  failover, quota ledger, budgets, event log, CLI, 77 tests.
-- **Phase 2** — specialist agents + orchestrator: planner, architect, coder,
-  tester, reviewer, devops, docs; shared task board and hand-off protocol.
+  failover, quota ledger, budgets, event log, CLI, tests.
+- **Phase 2 (done)** — specialist agents + orchestrator: planner, architect,
+  coder, tester, reviewer, devops, docs; shared task board (`board.json`),
+  review fix loop, `build` command, 91 tests.
 - **Phase 3** — workspace execution: generate files, run `npm`/`pytest`,
   iterate on failures, everything confined to `workspace/`.
 - **Phase 4** — FastAPI backend + React/Vite + Electron desktop UI replaying

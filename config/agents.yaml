@@ -43,13 +43,127 @@ agents:
         model: mock-echo
 
 # =============================================================================
-# Model assignment per role (used from Phase 2 onwards; kept here so the whole
-# policy lives in one place). Rationale is in docs/DECISIONS.md.
-#   planner / architect : Gemini Flash  -> needs a long context window
-#   coder               : Gemini Flash  -> writing files = large outputs
-#   tester              : Groq gpt-oss  -> short, fast, deterministic output
-#   reviewer            : OpenRouter    -> a DIFFERENT model family on purpose:
-#                                         a model reviewing its own work is
-#                                         biased towards saying "looks good"
+# Phase 2 specialists — model assignment per role (decision D5):
+#   planner / architect : Gemini Flash      -> long context window
+#   coder               : Gemini Flash      -> writing files = large outputs
+#   tester              : Groq gpt-oss      -> short, fast, deterministic output
+#   reviewer            : OpenRouter first  -> a DIFFERENT model family on purpose:
+#                                              a model reviewing its own work is
+#                                              biased towards saying "looks good"
 #   devops / docs       : Gemini Flash-Lite -> simple, high-volume tasks
+# Every chain ends in the offline mock, so the pipeline always completes even
+# with zero keys configured.
 # =============================================================================
+
+  planner:
+    role: Turns a plain-English goal into an ordered implementation plan.
+    prompt_file: backend/core/agents/prompts/planner.md
+    temperature: 0.2
+    max_output_tokens: 4096
+    routing:
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: groq
+        model: openai/gpt-oss-120b
+      - provider: openrouter
+        model: qwen/qwen3.8-27b:free
+      - provider: mock
+        model: mock-echo
+
+  architect:
+    role: Designs the module structure and data flow for the plan.
+    prompt_file: backend/core/agents/prompts/architect.md
+    temperature: 0.2
+    max_output_tokens: 4096
+    routing:
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: groq
+        model: openai/gpt-oss-120b
+      - provider: openrouter
+        model: qwen/qwen3.8-27b:free
+      - provider: mock
+        model: mock-echo
+
+  coder:
+    role: Produces the complete file contents for the design.
+    prompt_file: backend/core/agents/prompts/coder.md
+    temperature: 0.2
+    max_output_tokens: 8192
+    routing:
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: groq
+        model: qwen/qwen3.8-27b
+      - provider: openrouter
+        model: qwen/qwen3.8-27b:free
+      - provider: mock
+        model: mock-echo
+
+  tester:
+    role: Writes the test suite and states how to run it.
+    prompt_file: backend/core/agents/prompts/tester.md
+    temperature: 0.0
+    max_output_tokens: 4096
+    routing:
+      - provider: groq
+        model: openai/gpt-oss-120b
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: mock
+        model: mock-echo
+
+  reviewer:
+    role: Independent review from a different model family; emits approve or changes_requested.
+    prompt_file: backend/core/agents/prompts/reviewer.md
+    temperature: 0.0
+    # 8192, not 4096: the first-choice free reviewer is a "thinking" model, and
+    # a truncated budget yields an empty content field (see router empty guard).
+    max_output_tokens: 8192
+    routing:
+      - provider: openrouter
+        model: qwen/qwen3.8-27b:free
+      - provider: openrouter
+        model: z-ai/glm-5.2:free
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: mock
+        model: mock-echo
+
+  devops:
+    role: Produces deployment, configuration and CI files.
+    prompt_file: backend/core/agents/prompts/devops.md
+    temperature: 0.1
+    max_output_tokens: 4096
+    routing:
+      - provider: gemini
+        model: gemini-2.5-flash-lite
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: mock
+        model: mock-echo
+
+  docs:
+    role: Produces the README and user documentation.
+    prompt_file: backend/core/agents/prompts/docs.md
+    temperature: 0.3
+    max_output_tokens: 6144
+    routing:
+      - provider: gemini
+        model: gemini-2.5-flash-lite
+      - provider: gemini
+        model: gemini-3.8-flash
+      - provider: mock
+        model: mock-echo
+
+# ==============================================================================
+# Phase 2 pipeline: stage order and review policy (rationale in docs/DECISIONS.md).
+#   planner -> architect -> coder -> tester -> reviewer
+#     -> (if reviewer says changes_requested: coder fixes, reviewer re-checks,
+#         at most max_fix_iterations times)
+#     -> devops -> docs
+# A stage name must also be an agent defined above.
+# ==============================================================================
+pipeline:
+  stages: [planner, architect, coder, tester, reviewer, devops, docs]
+  max_fix_iterations: 1

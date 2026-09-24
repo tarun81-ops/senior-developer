@@ -104,6 +104,19 @@ class ServerError(ProviderError):
     retryable = True
 
 
+class EmptyResponseError(ProviderError):
+    """HTTP 200 but no content at all.
+
+    Free "thinking" models can spend the entire output budget on internal
+    reasoning and return an empty ``content`` field. The call cost real tokens,
+    so it counts against the quota - but an empty answer is not an answer, so
+    this is a retryable failure that moves the chain on.
+    """
+
+    kind = "empty"
+    retryable = True
+
+
 class NetworkError(ProviderError):
     """Timeouts and connection failures."""
 
