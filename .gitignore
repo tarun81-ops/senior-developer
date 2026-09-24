@@ -5,8 +5,10 @@
 data/secrets.json
 
 # --- Runtime state / generated output ---
+# Anchored to the repo root: an unanchored "workspace/" also matches the core
+# package backend/core/workspace/, which is source and must be committed.
 data/
-workspace/
+/workspace/
 
 # --- Python ---
 .venv/
