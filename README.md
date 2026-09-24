@@ -8,15 +8,17 @@ It runs **exclusively on free-tier LLM APIs** (Gemini, Groq, OpenRouter) and is
 built so that hitting a free-tier limit is a normal, handled event — not a
 crash.
 
-> **Current state: Phases 1–3 complete.**
+> **Current state: Phases 1–3 complete, Phase 4 (API) in progress.**
 > The provider layer (routing, retries, failover, quota tracking, budgets,
 > event log) runs the seven specialist agents as a pipeline behind
 > `python -m backend.cli build`: plan → design → code → test → review
 > (with a fix loop) → devops → docs, recorded on a shared task board.
 > **Phase 3 executes the result for real**: the stages' files are written into
 > `workspace/<project>/`, the tester's own command is run there, and failing
-> tests drive another coder round just like a review objection. The desktop UI
-> arrives in Phase 4.
+> tests drive another coder round just like a review objection.
+> **Phase 4 wraps that pipeline in a local FastAPI server** for the Electron
+> desktop UI (see [Local API](#local-api-phase-4--in-progress)); the API layer
+> is being built in reviewed steps.
 
 ---
 
@@ -158,12 +160,55 @@ and update `config/providers.yaml` / `config/agents.yaml` if an id 404s.
 
 ---
 
+## Local API (Phase 4 — in progress)
+
+The same pipeline, over HTTP, for the desktop UI. It is built in reviewed steps;
+**step 1 (foundations) is done**, the run/settings/approval endpoints follow.
+
+```powershell
+.\.venv\Scripts\python -m backend.api --port 8765
+```
+
+It prints a **token that is regenerated on every launch** — the UI reads it from
+that line and sends it as `X-API-Key` on every request:
+
+```powershell
+# health check (token required)
+Invoke-RestMethod http://127.0.0.1:8765/api/health -Headers @{ "X-API-Key" = "<token>" }
+
+# replay a run's events (after_seq is the cursor a reconnecting UI sends back)
+Invoke-RestMethod "http://127.0.0.1:8765/api/events?run_id=<run_id>&after_seq=0" `
+  -Headers @{ "X-API-Key" = "<token>" }
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Liveness + the port actually bound. Token required. |
+| `GET /api/events?run_id=&after_seq=` | Replay persisted events (D7 contract, stored in SQLite). |
+
+Security is deliberately boring and layered (D17): the server binds
+`127.0.0.1` only, every request must present the per-launch token, the `Host`
+header must be loopback (blocks DNS rebinding), `Origin` must be a Vite dev
+server or Electron's `file://`, and bodies over 256 KiB are refused. Events are
+persisted to `data/app.db` through a repository interface (D18) so a cloud
+database can replace SQLite later; **API keys are never stored in the database**
+and are never returned by any endpoint.
+
+---
+
 ## Project layout
 
 ```
 config/                 providers.yaml, agents.yaml, limits.yaml (all config lives here)
 backend/
   cli.py                doctor / providers / models / ask / build / demo / events
+  api/                  FastAPI layer for the desktop UI (Phase 4)
+    app.py              app factory, middleware, routers
+    security.py         per-launch token, Host/Origin checks, body cap (D17)
+    repository.py       EventRepository protocol + SQLite implementation (D18)
+    event_store.py      EventBus -> repository bridge, sequence numbers, replay
+    models.py           Pydantic request/response models
+    __main__.py         python -m backend.api (binds 127.0.0.1, prints the token)
   core/
     config.py           Settings + .env loading
     errors.py           error hierarchy (retryable vs not)
@@ -174,8 +219,8 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                138 tests, no network, no keys required
-docs/DECISIONS.md       why each decision was made (D1–D14)
+  tests/                156 tests, no network, no keys required
+docs/DECISIONS.md       why each decision was made (D1–D18)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -186,16 +231,17 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 138 tests, ~9s, offline
+.\.venv\Scripts\python -m pytest          # 156 tests, ~9s, offline
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
 error classification (via a fake transport), empty-completion handling, agent
 JSON extraction, the event log, the task board, the pipeline (stage order,
 context wiring, fix loop, budget stops), the workspace sandbox (path escapes,
-apply/dry-run/conflicts, command allowlist, timeouts, output truncation) and
-the CLI end-to-end against a throwaway project root. No test touches the
-network or needs an API key.
+apply/dry-run/conflicts, command allowlist, timeouts, output truncation), the
+CLI end-to-end against a throwaway project root, and the API foundations (token,
+Host/Origin, body cap, CORS, SQLite event persistence and replay). No test
+touches the network or needs an API key.
 
 ---
 
@@ -232,8 +278,10 @@ data in prompts.
   `workspace/<project>/`, the tester's command run in a sandbox (allowlist,
   timeout, truncated capture), test failures feeding the fix loop, `run`
   command for zero-cost re-runs, 138 tests.
-- **Phase 4** — FastAPI backend + React/Vite + Electron desktop UI replaying
-  `events.jsonl` live.
+- **Phase 4 (in progress)** — FastAPI backend + React/Vite + Electron desktop UI.
+  Step 1 done: loopback-bound API with per-launch token, Host/Origin checks,
+  request-size cap and SQLite-backed event replay (`data/app.db`, D17/D18).
+  Next: run/settings/approval endpoints, pipeline pause gates, SSE.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

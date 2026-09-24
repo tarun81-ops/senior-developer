@@ -239,6 +239,54 @@ command keep the human in control of when execution happens.
 
 ---
 
+## D17 — The API is loopback-only and token-gated on every request (Phase 4)
+
+**Decision:** the FastAPI server binds `127.0.0.1` only (not a default — there is
+no flag to change it), and every `/api` route requires three independent checks:
+a **per-launch random token** in `X-API-Key`, a **Host header** that names a
+loopback address, and an **Origin** from a fixed allowlist (Vite dev servers on
+5173 and Electron's `file://`). CORS is configured to exactly those origins, and
+request bodies are capped at 256 KiB. The token is generated with `secrets` at
+process start, printed once for the desktop shell, and never written to disk or
+read from the environment. Approve/reject must additionally re-check the token
+at the call site so the requirement is visible in the code.
+
+**Why:** this server runs model-authored code and exposes an "approve this
+command" action. Loopback binding is not authentication — any other process on
+the machine, including a browser page, can reach `127.0.0.1:8765`. The token
+stops the random web page (it cannot read the token), the Host check stops DNS
+rebinding (a hostile name resolving to loopback), and the Origin allowlist stops
+cross-origin reads in the browser. Three cheap checks beat one clever one, and
+none of them is a substitute for the sandbox (D15).
+
+**Cost accepted:** a browser-based UI must be served from the allowlisted
+origins, and there is no "open this in any browser tab" convenience. The CLI
+keeps working without a token — this decision is about the HTTP surface only.
+
+## D18 — All API state goes through a repository interface over `data/app.db` (Phase 4)
+
+**Decision:** every SQL statement lives behind a `Protocol`
+(`EventRepository`) in `backend/api/repository.py`; FastAPI routes and the
+pipeline manager only see the interface. SQLite lives at `Settings.db_path`
+(`data/app.db`), in WAL mode, with short-lived per-operation connections and
+`INSERT OR IGNORE` on `(run_id, seq)` so replay is idempotent. **API keys are
+never written to the database** — they go to the git-ignored `.env` (or
+Windows Credential Manager), and no endpoint ever returns one. Settings
+overrides (model per agent, provider order) persist to a git-ignored local YAML
+file written atomically; tracked `config/*.yaml` is never edited.
+
+**Why:** a per-launch in-memory app would lose every event on restart, and SQL
+scattered through route handlers would make a future cloud database a rewrite
+of the API instead of one new class. Key separation is a security boundary, not
+a storage detail: a database backup, a `data/` sync or a stray SQL dump must not
+be able to leak a provider key.
+
+**Cost accepted:** SQLite is single-host, so remote/multi-user access is out of
+scope until a cloud repository is written; the repository interface is the
+seam for that move.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -247,6 +295,6 @@ command keep the human in control of when execution happens.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI + React/Vite + Electron desktop UI streaming `events.jsonl` | not started |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 1 of 6: API foundations) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 
