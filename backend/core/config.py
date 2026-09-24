@@ -67,12 +67,15 @@ class Settings:
         }
 
 
-def load_env(root: Path | str | None = None, *, override: bool = False) -> Path | None:
+def load_env(root: Path | str | None = None, *, override: bool = True) -> Path | None:
     """Load ``.env`` into the process environment if it exists.
 
-    Returns the path that was loaded, or ``None``. Existing environment
-    variables win by default, so a key exported in the shell beats a stale
-    ``.env`` file.
+    Returns the path that was loaded, or ``None``. ``.env`` wins by default:
+    a stale leftover in the shell (we shipped with a revoked
+    ``OPENROUTER_API_KEY`` exported at process level once) must never
+    silently shadow a key the user just pasted into ``.env``. CI setups that
+    keep secrets only in the process environment are unaffected — if no
+    ``.env`` file exists, nothing is touched.
     """
     if load_dotenv is None:
         return None

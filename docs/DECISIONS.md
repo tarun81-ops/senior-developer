@@ -142,6 +142,13 @@ documents every variable. Keys are never printed by the CLI.
 of the filesystem for users who want that; `doctor`/`providers` only ever show
 `set` / `missing`.
 
+**Precedence (fixed in Phase 1):** `.env` wins over the shell environment
+(`load_env(override=True)`). A revoked `OPENROUTER_API_KEY` exported at
+process level once shadowed a fresh key in `.env`, and editing `.env`
+appeared to do nothing — the exact bug class that fix exists to prevent.
+CI setups that keep secrets only in the process environment are unaffected
+(no `.env` file → nothing is touched).
+
 ---
 
 ## Phase plan
