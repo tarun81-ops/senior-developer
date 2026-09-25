@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS runs (
     record_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_runs_created ON runs (created_at);
+CREATE TABLE IF NOT EXISTS deploys (
+    deploy_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    record_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deploys_created ON deploys (created_at);
 """
 
 
@@ -112,6 +119,14 @@ class EventRepository(Protocol):
 
     def load_runs(self, *, limit: int) -> list[dict[str, Any]]:
         """The newest ``limit`` run snapshots, oldest first."""
+
+    def save_deploy(
+        self, deploy_id: str, run_id: str, created_at: str, record: dict[str, Any]
+    ) -> None:
+        """Insert or replace one deploy's latest snapshot (D40)."""
+
+    def load_deploys(self, *, limit: int) -> list[dict[str, Any]]:
+        """The newest ``limit`` deploy snapshots, oldest first."""
 
 
 class SqliteEventRepository:
@@ -268,6 +283,29 @@ class SqliteEventRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT record_json FROM runs ORDER BY created_at DESC, run_id DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [json.loads(row["record_json"]) for row in reversed(rows)]
+
+    # -- deploys (D40) ---------------------------------------------------------
+    def save_deploy(
+        self, deploy_id: str, run_id: str, created_at: str, record: dict[str, Any]
+    ) -> None:
+        """Insert or replace one deploy's latest snapshot. Tokens are never in it."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO deploys (deploy_id, run_id, created_at, record_json) "
+                "VALUES (?, ?, ?, ?)",
+                (deploy_id, run_id, created_at, json.dumps(record, default=str)),
+            )
+
+    def load_deploys(self, *, limit: int) -> list[dict[str, Any]]:
+        """The newest ``limit`` deploy snapshots, oldest first."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT record_json FROM deploys ORDER BY created_at DESC, deploy_id DESC LIMIT ?",
                 (max(1, int(limit)),),
             ).fetchall()
         return [json.loads(row["record_json"]) for row in reversed(rows)]

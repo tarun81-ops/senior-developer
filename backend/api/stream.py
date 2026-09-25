@@ -24,8 +24,29 @@ from backend.api.models import TERMINAL_STATUSES
 from backend.api.repository import StoredEvent
 from backend.api.run_manager import RunManager
 
-#: Kinds of the one closing event every managed run gets.
-CLOSING_KINDS = frozenset(f"api.run_{status}" for status in TERMINAL_STATUSES)
+#: Kinds of the one closing event every managed run, and every deploy (D40), gets.
+CLOSING_KINDS = frozenset(f"api.run_{status}" for status in TERMINAL_STATUSES) | {
+    "deploy.succeeded",
+    "deploy.failed",
+}
+
+
+class StreamOwners:
+    """Runs and deploys share the SSE endpoint, each under its own id (D40).
+
+    A deploy streams under its own id, never the run's: nothing may follow a
+    run's closing event (D23), and a deploy happens after the run has ended.
+    """
+
+    def __init__(self, *owners) -> None:  # noqa: ANN002 - anything with is_finished(id)
+        self._owners = owners
+
+    def is_finished(self, stream_id: str) -> bool | None:
+        for owner in self._owners:
+            finished = owner.is_finished(stream_id)
+            if finished is not None:
+                return finished
+        return None
 
 #: D19: a timestamped comment frame about this often keeps an idle connection warm.
 HEARTBEAT_SECONDS = 20.0

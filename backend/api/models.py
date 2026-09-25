@@ -543,3 +543,100 @@ class KeysUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     keys: dict[str, str] = Field(..., min_length=1, max_length=10)
+
+
+# -- deploys (Phase 5, P5.5; D40) ------------------------------------------------
+class DeployTarget(BaseModel):
+    """Where a project would go and how it is built there."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str  # "static" | "python" | "unsupported"
+    reason: str
+    target: str | None = None  # "github-pages" | "render"
+    framework: str | None = None
+    build_command: str | None = None
+    start_command: str | None = None
+    publish_dir: str | None = None
+
+
+class PublishedFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    size: int
+
+
+class ExcludedFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    reason: str
+
+
+class SecretFinding(BaseModel):
+    """A likely credential: where it is and what kind, never the value (D37)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    line: int
+    kind: str
+
+
+class DeployPreviewResponse(BaseModel):
+    """``GET /api/runs/{id}/deploy/preview``: everything a human confirms (D40).
+
+    Built locally: no network call and no token is needed to preview.
+    ``fingerprint`` identifies exactly this set of files and target; the
+    confirm call must send it back, so what is published is what was shown.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    project: str
+    can_deploy: bool
+    #: every reason it cannot, in the order to fix them; empty when it can
+    blockers: list[str] = Field(default_factory=list)
+    target: DeployTarget
+    repo: str
+    visibility: str | None = None  # "public" | "private"
+    expected_url: str | None = None
+    files: list[PublishedFile] = Field(default_factory=list)
+    excluded: list[ExcludedFile] = Field(default_factory=list)
+    findings: list[SecretFinding] = Field(default_factory=list)
+    total_bytes: int = 0
+    #: key variables this target needs that are not set
+    missing_keys: list[str] = Field(default_factory=list)
+    fingerprint: str
+
+
+class DeployRequest(BaseModel):
+    """``POST /api/runs/{id}/deploy``: confirm exactly what the preview showed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fingerprint: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
+class DeployRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deploy_id: str
+    run_id: str
+    project: str
+    target: str
+    status: str  # "queued" | "running" | "succeeded" | "failed"
+    url: str | None = None
+    error: str | None = None
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class DeploysListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    deploys: list[DeployRecordResponse] = Field(default_factory=list)

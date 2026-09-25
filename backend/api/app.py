@@ -32,6 +32,7 @@ from starlette.concurrency import run_in_threadpool
 
 from backend import __version__
 from backend.api import settings_service
+from backend.api.deploy_manager import ClientsFactory, DeployManager, DeployRefused
 from backend.api.event_store import EventStore
 from backend.api.middleware import BodySizeLimitMiddleware
 from backend.api.models import (
@@ -39,6 +40,10 @@ from backend.api.models import (
     ApprovalResponse,
     CancelResponse,
     CreateRunRequest,
+    DeployPreviewResponse,
+    DeployRecordResponse,
+    DeployRequest,
+    DeploysListResponse,
     EventResponse,
     EventsPageResponse,
     FileContentResponse,
@@ -55,7 +60,7 @@ from backend.api.models import (
 from backend.api.repository import SqliteEventRepository
 from backend.api.run_manager import GateNotWaiting, RunManager, RunNotFound, RunOptions
 from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
-from backend.api.stream import event_frames
+from backend.api.stream import StreamOwners, event_frames
 from backend.api.workspace_files import list_files, read_file
 from backend.core.config import get_settings, load_env
 from backend.core.errors import ConfigError
@@ -90,6 +95,7 @@ def create_app(
     security: LaunchSecurity | None = None,
     token: str | None = None,
     runtime_factory: Callable[[str], Runtime] | None = None,
+    deploy_clients: ClientsFactory | None = None,
 ) -> FastAPI:
     """Build the app. Tests pass ``root=tmp_path`` to keep all state in tmp."""
     # State is built *eagerly*, not in the lifespan. A test client that never
@@ -109,6 +115,9 @@ def create_app(
         event_store=event_store,
         runtime_factory=runtime_factory,
     )
+    # Phase 5: deploys of finished runs (D40). ``deploy_clients`` is the seam
+    # tests use to hand it fake GitHub/Render clients.
+    deploys = DeployManager(runs=manager, event_store=event_store, clients=deploy_clients)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -121,6 +130,7 @@ def create_app(
             # blocks on worker threads, so it runs in a threadpool rather than
             # stalling the event loop.
             await run_in_threadpool(manager.shutdown)
+            deploys.shutdown()
             event_store.close()
 
 
@@ -147,6 +157,7 @@ def create_app(
     app.state.settings = resolved
     app.state.event_store = event_store
     app.state.run_manager = manager
+    app.state.deploy_manager = deploys
 
     # CORS is a browser rule, not authentication: it only tells a *browser*
     # whether to let page JavaScript read the response. The token still guards
@@ -199,6 +210,7 @@ def create_app(
 
     @api.get("/events/stream")
     async def stream_events(
+        request: Request,
         run_id: str = Query(..., min_length=1, max_length=64),
         after_seq: int | None = Query(None, ge=-1, description="Send events with seq > this"),
         last_event_id: str | None = Header(None, alias="Last-Event-ID"),
@@ -212,10 +224,12 @@ def create_app(
         if after_seq is None:
             # the standard SSE resume header, for non-UI consumers
             after_seq = int(last_event_id) if (last_event_id or "").isdigit() else -1
-        if manager.is_finished(run_id) is None and store.last_seq(run_id) < 0:
+        # a run id or a deploy id: each has its own stream (D40)
+        owners = StreamOwners(manager, request.app.state.deploy_manager)
+        if owners.is_finished(run_id) is None and store.last_seq(run_id) < 0:
             raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
         return StreamingResponse(
-            event_frames(store, manager, run_id, after_seq=after_seq),
+            event_frames(store, owners, run_id, after_seq=after_seq),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -329,6 +343,42 @@ def create_app(
                 status_code=404, detail="No such file in this run's project"
             ) from None
         return FileContentResponse(run_id=run_id, **found.__dict__)
+
+    # -- deploys (Phase 5, P5.5; D35-D40) ---------------------------------------
+    # Preview is local and read-only; deploy publishes, so, like approve and
+    # reject, it re-checks the token at the call site (D17).
+    @api.get("/runs/{run_id}/deploy/preview", response_model=DeployPreviewResponse)
+    def deploy_preview(run_id: str) -> DeployPreviewResponse:
+        """What a deploy of this run would publish, where, and why it can't yet."""
+        try:
+            return deploys.preview(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @api.post("/runs/{run_id}/deploy", response_model=DeployRecordResponse, status_code=202)
+    def deploy_run(
+        run_id: str,
+        body: DeployRequest,
+        _auth: None = Depends(require_token),
+    ) -> DeployRecordResponse:
+        """Publish exactly what the preview with this fingerprint showed."""
+        try:
+            return deploys.start(run_id, body.fingerprint).to_response()
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DeployRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.get("/runs/{run_id}/deploys", response_model=DeploysListResponse)
+    def list_deploys(run_id: str) -> DeploysListResponse:
+        """This run's deploys, newest first. Progress streams under each deploy_id."""
+        try:
+            manager.get(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return DeploysListResponse(
+            run_id=run_id, deploys=[d.to_response() for d in deploys.list_for_run(run_id)]
+        )
 
     # -- approval gates (Part A, step 3) -------------------------------------
     # D17: these two routes re-check the token at the call site, on top of the

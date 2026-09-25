@@ -43,7 +43,7 @@ FAKE_KEYS = {
     "GROQ_API_KEY": "gsk_e2e-groq-secret-0123456789",
 }
 
-#: The whole API surface (Part A, plus the B4 file routes). A new route fails
+#: The whole API surface (Part A, the B4 file routes, the P5.5 deploy routes). A new route fails
 #: test_the_api_surface_is_pinned until it is added here, tested, and
 #: documented in the README.
 SURFACE = {
@@ -58,6 +58,9 @@ SURFACE = {
     ("POST", "/api/runs/{run_id}/reject"),
     ("GET", "/api/runs/{run_id}/files"),
     ("GET", "/api/runs/{run_id}/files/content"),
+    ("GET", "/api/runs/{run_id}/deploy/preview"),
+    ("POST", "/api/runs/{run_id}/deploy"),
+    ("GET", "/api/runs/{run_id}/deploys"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
     ("PUT", "/api/settings/keys"),

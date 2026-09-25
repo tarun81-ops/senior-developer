@@ -90,6 +90,12 @@ class EventStore:
     def load_runs(self, *, limit: int) -> list[dict]:
         return self.repository.load_runs(limit=limit)
 
+    def save_deploy(self, deploy_id: str, run_id: str, created_at: str, record: dict) -> None:
+        self.repository.save_deploy(deploy_id, run_id, created_at, record)
+
+    def load_deploys(self, *, limit: int) -> list[dict]:
+        return self.repository.load_deploys(limit=limit)
+
     def run_ids(self, *, limit: int = 100) -> list[str]:
         return self.repository.run_ids(limit=limit)
 

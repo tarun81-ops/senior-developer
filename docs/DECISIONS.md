@@ -1243,6 +1243,76 @@ and Render exactly as they were.
 
 ---
 
+## D40 — Deploy API: preview then confirm by fingerprint; one stream per deploy (Phase 5)
+
+**Decision:** three routes (P5.5), bringing the pinned surface (D24) to 18,
+all behind the token.
+
+* **Preview.** `GET /api/runs/{id}/deploy/preview` is built **locally**: no
+  network call and no token needed. It returns:
+  * eligibility (D35), detection (D36), and the publish set with its
+    exclusions and secret findings (D37, never values);
+  * the key variables this target still needs, the repo name and
+    visibility, and the expected URL;
+  * every blocker in plain words;
+  * a **fingerprint**: sha-256 over the target and commands and every
+    published file's path and bytes.
+* **Confirm.** `POST /api/runs/{id}/deploy {"fingerprint"}` rebuilds the plan
+  and refuses (`409`) if:
+  * any blocker remains;
+  * the fingerprint differs, meaning the project changed since the preview;
+  * the project already has an active deploy.
+
+  The token is re-checked at the call site, as for approve and reject
+  (D17). Just before publishing, the worker re-reads the files and checks
+  the fingerprint once more, so what's published is **exactly what was
+  shown**.
+* **History.** `GET /api/runs/{id}/deploys` lists the run's deploys, newest
+  first.
+* **Execution.** Deploys run on one worker thread, separate from pipeline
+  runs, with at most one active deploy per project. A deploy is `queued`,
+  then `running`, then `succeeded` or `failed`, and a failed one keeps the
+  target's message (D38/D39).
+* **One stream per deploy.** Progress streams under the deploy's own ID on
+  the existing SSE endpoint, never the run's. D23 guarantees nothing follows
+  a run's closing event, and a deploy always comes after one.
+  * Each deploy has one closing event, `deploy.succeeded` or
+    `deploy.failed`, written in the same locked step that sets its final
+    status. The stream closes on it.
+  * `StreamOwners` lets the endpoint ask either manager whether an ID is
+    finished.
+* **History across restarts.** Deploy snapshots are saved in a `deploys`
+  table in `app.db` (the D32 pattern). A deploy found unfinished at startup
+  becomes `failed` "Interrupted… Deploy again to finish it", with its
+  closing event. Tokens are never saved.
+* **Tests.**
+  * 13 API tests on real mock runs whose generated tests ran and passed,
+    against the fake GitHub and fake Render:
+    * static and backend deploys end to end;
+    * a project edited after the preview is refused;
+    * skipped or missing tests are refused;
+    * a planted key blocks the deploy without echoing it;
+    * missing keys are named;
+    * one deploy per project;
+    * a failed deploy ends its own stream and leaves the run's untouched;
+    * history and interrupted deploys across a restart;
+    * 404s;
+    * no token or key in any response or event.
+  * Mutation-checked: disabling the fingerprint check or the
+    one-per-project check each fails a test.
+
+**Why:** publishing is public and effectively permanent, so the human must
+confirm a specific, reviewable thing, and the server must hold them to it.
+Refusal is checked server-side, not only in the UI. Separate streams keep
+the run's record exactly as it ended.
+
+**Cost accepted:** a deploy can't be cancelled once running (GitHub and
+Render steps are short, and the outcome is always reported). The preview's
+URL for Pages can't include your username without a network call, so it
+shows a placeholder until the deploy reports the real URL.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
