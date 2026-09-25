@@ -80,6 +80,56 @@
     await until(() => [...document.querySelectorAll(".events tr")].at(-1)?.dataset.kind === "api.run_cancelled",
       "the closing event");
     step("cancel button gone once finished", !button("Cancel run"));
+
+    // -- B3: every approval dialog, decided through the UI --------------------
+    const dialog = () => $("dialog.approval[open]");
+    const waitDialog = (gate) => until(() => {
+      const d = dialog();
+      return d && d.querySelector("h2").textContent.toLowerCase().includes(gate) ? d : null;
+    }, `the ${gate} dialog`);
+    const inDialog = (text) => [...dialog().querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+    const inert = (d) => !d.querySelector("a, img, script, iframe, [href], [src]");
+
+    type($("textarea[name=request]"), "smoke: all three gates");
+    type($("input[name=project]"), "smoke-gates");
+    setChecked(checkbox("gate-plan"), true);
+    setChecked(checkbox("gate-architecture"), true);
+    step("execution gate still on for this run", checkbox("gate-execution").checked);
+    button("Start run").click();
+
+    let d = await waitDialog("plan");
+    step("plan dialog shows the stage output as markdown", d.querySelector(".markdown")?.textContent.includes("MOCK OK"));
+    step("plan dialog content is inert (no links, images, scripts)", inert(d));
+    step("the note field has focus, not Approve", document.activeElement === d.querySelector("textarea[name=approval-note]"));
+    inDialog("Decide later").click();
+    await until(() => !dialog(), "the dialog to close");
+    step("'Decide later' leaves the run waiting", pill() === "waiting_approval");
+    button("Review and decide").click();
+    d = await waitDialog("plan");
+    type(d.querySelector("textarea[name=approval-note]"), "plan looks fine");
+    inDialog("Approve").click();
+
+    d = await waitDialog("architecture");
+    step("architecture dialog opens next", /architecture/i.test(d.querySelector("h2").textContent));
+    inDialog("Approve").click();
+
+    d = await waitDialog("command");
+    const field = (name) => d.querySelector(`[data-field="${name}"]`)?.textContent;
+    step("execution dialog shows the exact command", field("command") === "python -m pytest -q", field("command"));
+    step("execution dialog shows the working folder",
+      /[\\/]workspace[\\/]smoke-gates$/.test(field("cwd") || ""), field("cwd"));
+    step("execution dialog shows the time limit", /^300 seconds/.test(field("timeout") || ""), field("timeout"));
+    step("execution command is not rendered as markdown", !d.querySelector(".markdown"));
+    await new Promise((r) => setTimeout(r, 600)); // a person reads first (and a screenshot can be taken)
+    type(d.querySelector("textarea[name=approval-note]"), "not on my machine");
+    inDialog("Reject").click();
+    await until(() => pill() === "failed", "the rejected run to fail");
+    step("reject fails the run with the note", /execution/.test($(".run .error")?.textContent || "")
+      && /not on my machine/.test($(".run .error").textContent), $(".run .error")?.textContent);
+    const kinds3 = [...document.querySelectorAll(".events tr")].map((r) => r.dataset.kind);
+    step("the log records both approvals and the rejection",
+      kinds3.filter((k) => k === "api.run_approved").length === 2 && kinds3.includes("api.run_rejected"));
+    step("no command ran", !kinds3.includes("exec.start"));
   } catch (err) {
     report.error = err.message;
   }

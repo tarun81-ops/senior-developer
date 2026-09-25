@@ -237,8 +237,8 @@ phases, each ending with something you can run:
 |---|---|---|
 | B1 | App shell: backend launch, token handoff, `sda://app` serving, health shown in the window | **done** |
 | B2 | Create a run + live event timeline | **done** |
-| B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | next |
-| B4 | Task board + read-only file viewer | |
+| B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | **done** |
+| B4 | Task board + read-only file viewer | next |
 | B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | |
 | B6 | Run history + polish | |
 
@@ -253,8 +253,9 @@ cd desktop; npm install
 npm start          # build the UI and open the app
 npm run dev        # development: Vite hot reload + Electron
 npm test           # client, form rules, bundle check, shell vs a real backend (offline)
-npm run smoke      # real Electron: security checks, then drives two offline mock
-                   # runs through the UI (one to success, one cancelled at a gate)
+npm run smoke      # real Electron: security checks, then drives offline mock runs
+                   # through the UI: success, cancel at a gate, and all three
+                   # approval dialogs (approve plan + architecture, reject execution)
 ```
 
 What B2 gives you:
@@ -266,9 +267,23 @@ What B2 gives you:
   stage timeline (planner through docs) and a live event log. The log is read
   from the stream with `fetch()`, and it resumes from the last event after a
   dropped connection.
-- **Gates and cancel.** A run that reaches a gate says which one it is
-  waiting at; the approval dialogs are B3. **Cancel run** works at any point
-  before the run finishes.
+- **Gates and cancel.** **Cancel run** works at any point before the run
+  finishes.
+
+What B3 gives you: when a run reaches a gate, an approval dialog opens.
+
+- **Plan and architecture gates** show that stage's full output, rendered
+  from markdown by a sanitizing renderer. HTML is dropped, and links and
+  images appear as plain text showing their target, so nothing in the dialog
+  is clickable or loads anything (D27, D29).
+- **The execution gate** shows the exact command, working folder and time
+  limit, verbatim and never rendered as markdown. Its button reads
+  **Approve and run**.
+- **Deciding.** Add an optional note, then **Approve** or **Reject**. A
+  rejected run ends `failed` with your note as the reason. **Decide later**
+  closes the dialog and leaves the run waiting; **Review and decide** reopens
+  it. The note field has focus when the dialog opens, so pressing Enter can
+  never approve by accident.
 - **Developer menu.** In development builds (`npm run dev`) a **Developer**
   menu offers the offline mock model, so you can try runs without spending
   quota. Production builds (`npm start`) don't contain it, and a test builds
@@ -334,8 +349,10 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   src/runRequest.js     new-run defaults (execution gate on) and request body
   src/NewRunForm.jsx    the New run form; DevMenu.jsx is development-only
   src/RunView.jsx       status, stage timeline, live event log, cancel
-  test/                 node --test: client, form rules, bundle, shell vs a real backend
-docs/DECISIONS.md       why each decision was made (D1–D28)
+  src/ApprovalDialog.jsx  plan/architecture/execution dialogs, approve/reject
+  src/SafeMarkdown.js   sanitizing markdown renderer: no HTML, no links, no images
+  test/                 node --test: client, form rules, bundle, hostile markdown, shell
+docs/DECISIONS.md       why each decision was made (D1–D29)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -350,9 +367,10 @@ workspace/              where generated apps will live — git-ignored
 ```
 
 ```powershell
-cd desktop; npm test                       # 16 tests: stream client, form rules, production
-                                           # bundle has no mock model, shell vs a real backend
-npm run smoke                              # real Electron: 16 steps, exits 0/1
+cd desktop; npm test                       # 34 tests: stream client, form rules, production
+                                           # bundle has no mock model, hostile markdown,
+                                           # shell vs a real backend
+npm run smoke                              # real Electron: 29 steps, exits 0/1
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -417,7 +435,9 @@ data in prompts.
   launch with the token over stdin and `SDA_READY`, `sda://app` serving,
   locked-down renderer with CSP, health in the window (D25–D27). B2 done:
   New run form (execution gate on by default), live stage timeline and event
-  log, cancel, development-only mock model (D28). Next: B3.
+  log, cancel, development-only mock model (D28). B3 done: approval dialogs
+  for all three gates, sanitized markdown with no clickable links, verbatim
+  command/folder/time limit at the execution gate (D29). Next: B4.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

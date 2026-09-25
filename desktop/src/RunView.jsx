@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { CLOSING_KINDS } from "./api.js";
+import ApprovalDialog from "./ApprovalDialog.jsx";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -16,6 +17,9 @@ export default function RunView({ client, runId }) {
   const [events, setEvents] = useState([]);
   const [streamError, setStreamError] = useState(null);
   const [cancelling, setCancelling] = useState(false);
+  // The dialog opens for each new wait (a gate can open again, e.g. the
+  // execution gate on a fix-loop rerun). "Decide later" hides it until the next.
+  const [dismissedWait, setDismissedWait] = useState(0);
   const latest = useRef(0);
 
   useEffect(() => {
@@ -40,6 +44,8 @@ export default function RunView({ client, runId }) {
   }, [client, runId]);
 
   const finished = run ? TERMINAL.has(run.status) : false;
+  const waits = events.filter((e) => e.kind === "api.run_waiting_approval").length;
+  const waiting = run?.status === "waiting_approval" && run.gate && !run.gate.decision;
   const closed = events.some((e) => CLOSING_KINDS.has(e.kind));
 
   async function cancel() {
@@ -61,11 +67,20 @@ export default function RunView({ client, runId }) {
       <p className="muted">
         Run <code>{runId}</code>{run?.project && <> · project <code>{run.project}</code></>}
       </p>
-      {run?.status === "waiting_approval" && run.gate && (
+      {waiting && (
         <p className="notice">
-          Waiting for your approval at the <strong>{run.gate.gate}</strong> gate. Approval dialogs
-          arrive in the next UI phase; until then you can cancel the run.
+          Waiting for your approval at the <strong>{run.gate.gate}</strong> gate.{" "}
+          <button type="button" onClick={() => setDismissedWait(0)}>Review and decide</button>
         </p>
+      )}
+      {waiting && (
+        <ApprovalDialog
+          key={waits}
+          client={client}
+          run={run}
+          open={dismissedWait !== waits}
+          onClose={() => setDismissedWait(waits)}
+        />
       )}
       {run?.error && <p className="error">{run.error}</p>}
       {streamError && <p className="error">Event stream: {streamError}</p>}

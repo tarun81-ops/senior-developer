@@ -635,6 +635,58 @@ by hand.
 
 ---
 
+## D29 — Approval dialogs: inert model text, verbatim command, no accidental approve (Phase 4, Part B)
+
+**Decision:** a run waiting at a gate opens a modal `<dialog>`
+(`showModal()`, so the page behind it is inert).
+
+* **Plan and architecture gates.** The dialog shows the stage's full output
+  from the run state (the gate payload is cut at 4,000 characters), rendered
+  by `SafeMarkdown`:
+  * `react-markdown` 10 builds React elements and never sets innerHTML;
+  * `skipHtml` drops raw HTML;
+  * an allowlist of plain text elements (headings, paragraphs, lists,
+    emphasis, code, quotes); anything else is unwrapped to its text;
+  * links and images are replaced with plain text showing their target
+    exactly as written, so nothing is clickable or fetched, and a
+    `javascript:` or look-alike URL is visible for what it is.
+* **Execution gate.** The command, working folder and time limit are shown
+  verbatim in `<pre>`, never through markdown. Its button reads
+  **Approve and run**.
+* **Focus.** No button has initial focus. The dialog focuses the note field,
+  so Enter cannot approve.
+* **Deciding later.** Escape or **Decide later** closes the dialog without
+  deciding; the run keeps waiting and **Review and decide** reopens it. Each
+  new wait (a gate can reopen, e.g. the execution gate on a fix-loop rerun)
+  opens a fresh dialog with an empty note.
+* **Reject.** A rejected run ends `failed` with the note as its error. A
+  `409` (the run was cancelled, or is no longer waiting) is shown as "no
+  longer waiting" rather than as an error.
+* **Tests:**
+  * `test/markdown.test.js` renders 15 hostile inputs (script, `img onerror`,
+    raw anchors, iframe, style, `svg onload`, `javascript:`, https,
+    autolinks, bare URLs, reference links, markdown and `data:` images,
+    comments, entities). It asserts only allowlisted tags and our own
+    `class` attribute appear. It was checked against mutations: removing the
+    link replacement fails 5 tests, and turning off `skipHtml` fails 4.
+  * The smoke test drives all three dialogs in real Electron: approve plan
+    and architecture, then reject the execution gate on a detected
+    `python -m pytest -q`. The dialog must be inert, show the exact
+    command, folder and 300 s limit, and nothing may run.
+
+**Why:** the approval dialog is where model output meets the button that runs
+code on the user's machine. Model text must be unable to become a link, an
+image, a script or a fake button, and the command must be shown exactly as it
+will run. D26's CSP is the second line: even a renderer bug could not run
+script or send data anywhere but the API.
+
+**Cost accepted:** no tables (GitHub-flavoured markdown is not enabled) and no
+clickable links in plans. Both can be added later as deliberately reviewed
+changes. The dialog is modal, so the event log behind it can't be scrolled
+until you choose **Decide later**.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -643,6 +695,6 @@ by hand.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B2 done, B3 next) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B3 done, B4 next) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

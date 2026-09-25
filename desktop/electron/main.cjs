@@ -113,6 +113,12 @@ function smokeRoot() {
   for (const dir of ["config", "backend/core/agents/prompts"]) {
     fs.cpSync(path.join(REPO_ROOT, dir), path.join(root, dir), { recursive: true });
   }
+  // A project that already has tests/, so the pipeline detects a test command
+  // and the smoke reaches a real execution gate on the offline mock model.
+  // The smoke rejects that gate, so nothing is ever executed.
+  const tests = path.join(root, "workspace", "smoke-gates", "tests");
+  fs.mkdirSync(tests, { recursive: true });
+  fs.writeFileSync(path.join(tests, "test_ok.py"), "def test_ok():\n    pass\n");
   return root;
 }
 
@@ -124,7 +130,22 @@ function smokeRoot() {
 async function smoke(win) {
   await new Promise((resolve) => win.webContents.once("did-finish-load", resolve));
   const script = fs.readFileSync(path.join(__dirname, "smoke-page.js"), "utf8");
+  const shot = process.env.SDA_SMOKE_SCREENSHOT;
+  let dialogShot = null;
+  if (shot) {
+    // for review: also capture the execution dialog while it is open
+    dialogShot = setInterval(async () => {
+      const open = await win.webContents
+        .executeJavaScript("!!document.querySelector('dialog.approval[open] [data-field=command]')")
+        .catch(() => false);
+      if (!open || !dialogShot) return;
+      clearInterval(dialogShot);
+      dialogShot = null;
+      fs.writeFileSync(shot.replace(/\.png$/, "-execution.png"), (await win.webContents.capturePage()).toPNG());
+    }, 100);
+  }
   const report = await win.webContents.executeJavaScript(script);
+  if (dialogShot) clearInterval(dialogShot);
   for (const s of report.steps) {
     console.log(`smoke: ${s.ok ? "ok  " : "FAIL"} ${s.name}${s.detail === undefined ? "" : ` (${JSON.stringify(s.detail)})`}`);
   }

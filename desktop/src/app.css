@@ -37,3 +37,14 @@ button { font: inherit; padding: 4px 12px; }
 .events td { padding: 2px 6px; vertical-align: top; border-bottom: 1px solid #f2f2f2; }
 .events td:last-child { overflow-wrap: anywhere; }
 .events td:nth-child(-n+3) { white-space: nowrap; }
+dialog.approval { width: min(820px, 92vw); max-height: 88vh; border: 1px solid #bbb; border-radius: 8px; padding: 16px; }
+dialog.approval::backdrop { background: rgba(0, 0, 0, 0.35); }
+dialog.approval h2 { margin-top: 0; font-size: 18px; }
+.stage-output .markdown { max-height: 50vh; overflow: auto; border: 1px solid #eee; border-radius: 6px; padding: 0 12px; }
+.md-url, .md-image { color: #666; font-family: ui-monospace, monospace; font-size: 0.9em; overflow-wrap: anywhere; }
+.command-details dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; }
+.command-details dt { font-weight: 600; }
+.command-details dd { margin: 0; }
+pre.verbatim { margin: 0; padding: 6px 8px; background: #f6f6f6; border: 1px solid #ddd; border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+button.approve { font-weight: 600; }
