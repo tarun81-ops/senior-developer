@@ -137,7 +137,7 @@ class GitHubClient:
         """Make the default branch hold exactly ``files``. Returns the new commit sha,
         or ``None`` when the branch already held exactly these files."""
         base = f"/repos/{repo.owner}/{repo.name}/git"
-        head = self._call("GET", f"{base}/ref/heads/{repo.default_branch}").json()["object"]["sha"]
+        head = self.head_commit(repo)
         base_tree = self._call("GET", f"{base}/commits/{head}").json()["tree"]["sha"]
         entries = []
         for path, content in files:
@@ -160,6 +160,11 @@ class GitHubClient:
             json={"sha": commit, "force": False},
         )
         return commit
+
+    def head_commit(self, repo: Repo) -> str:
+        """The sha the default branch points at."""
+        path = f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{repo.default_branch}"
+        return self._call("GET", path).json()["object"]["sha"]
 
     # -- Pages ---------------------------------------------------------------------
     def ensure_pages(self, repo: Repo) -> str:

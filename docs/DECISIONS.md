@@ -1180,6 +1180,69 @@ deploy, and pages built by the workflow take about a minute after the push.
 
 ---
 
+## D39 — Render client: exact-commit deploys to one always-on service, checked before any write (Phase 5)
+
+**Decision:** `backend/core/deploy/render.py` (P5.4) deploys a Python backend.
+
+* **Order.** All the refusals run **before anything is written** on GitHub or
+  Render:
+  1. resolve the workspace: `RENDER_OWNER_ID`, or the key's only workspace.
+     Several workspaces with no choice made is refused, listing their names
+     and IDs;
+  2. find the service `sda-<folder>`. If it exists but builds from any repo
+     other than `github.com/<login>/sda-<folder>`, it isn't ours and is
+     refused.
+
+  Only then: ensure the **private** repo (D36) and commit the snapshot
+  (D38).
+* **Service.** Created once as a `web_service` with runtime `python`, plan
+  `free`, region `oregon`, and the detected `buildCommand`/`startCommand`
+  (D36), with **`autoDeploy: no`**. Render's own first deploy is followed.
+  After that, each deploy is `POST /deploys` with the **exact `commitId`**
+  just pushed, so the app always knows which deploy is its own and what it
+  runs.
+* **Redeploys.**
+  * If the commands changed, the service is `PATCH`ed first.
+  * An unchanged project on a service whose latest deploy is `live` is not
+    redeployed.
+  * An unchanged project whose last deploy failed is deployed again.
+* **Waiting.** The deploy is polled until `live`. `build_failed`,
+  `update_failed`, `pre_deploy_failed`, `canceled` or `deactivated` fail
+  with a link to the service's dashboard logs. An unknown status or a
+  15-minute timeout also fails.
+* **Errors are explained without the key.**
+  * 401: the key was rejected.
+  * 402: the workspace needs payment details.
+  * 429: rate limited, with its reset time.
+  * 400/404 on create mentioning the repo: **Render's GitHub app can't see
+    the repo**, with the fix: install it with access to all repositories,
+    because new `sda-*` repos are created on deploy.
+  * Network failure.
+* **Checked against the source.** Every field, endpoint and status was
+  checked on 2026-09-26 against Render's published OpenAPI
+  (`api-docs.render.com`), not written from memory. The fake Render in the
+  tests follows those shapes.
+* **Tests.**
+  * 16 tests against the fake Render plus the fake GitHub of D38.
+  * Mutation-checked: disabling the foreign-service check, deploying
+    "HEAD" instead of the exact commit, or making the repo public each fails
+    a test.
+
+**Why:** exact-commit deploys make the result reproducible and attributable,
+and turning off auto-deploy means nothing but a confirmed deploy reaches the
+service. Checking before writing means a refusal leaves the user's GitHub
+and Render exactly as they were.
+
+**Cost accepted:**
+* Render's free web services sleep when idle, so the first request after a
+  while is slow; paid plans are a later setting.
+* If Render can't see the repo, the private repo has already been created
+  by then. Render can only be pointed at a repo that exists, and the error
+  says how to fix access.
+* One workspace per deploy.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
