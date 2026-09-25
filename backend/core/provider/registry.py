@@ -147,8 +147,14 @@ class Registry:
         return cls.load_effective(settings)[0]
 
     @classmethod
-    def load_effective(cls, settings: Settings) -> tuple[Registry, LocalOverrides]:
-        """The registry plus the overrides actually applied to it.
+    def load_effective(
+        cls, settings: Settings
+    ) -> tuple[Registry, LocalOverrides, str | None]:
+        """The registry, the overrides actually applied, and why they were not.
+
+        The third value is ``None`` normally, and a sentence naming the file
+        and the reason when the saved overrides had to be ignored (the
+        settings screen shows it, D31).
 
         A bad ``data/settings.local.yaml`` (unparsable, or naming an agent,
         provider or model that no longer exists) must not take down every run
@@ -159,7 +165,7 @@ class Registry:
         path = settings.local_settings_path
         try:
             overrides = read_overrides(path)
-            return cls._load(settings, overrides), overrides
+            return cls._load(settings, overrides), overrides, None
         except ConfigError as exc:
             if not path.exists():
                 raise
@@ -171,7 +177,11 @@ class Registry:
                 path,
                 exc,
             )
-            return registry, defaults
+            warning = (
+                f"Your saved settings in {path} were ignored, so runs use the "
+                f"defaults from config/: {exc}"
+            )
+            return registry, defaults, warning
 
     @classmethod
     def _load(cls, settings: Settings, overrides: LocalOverrides) -> Registry:

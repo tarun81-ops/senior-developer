@@ -64,6 +64,9 @@ OVERRIDES = {"agents": {"coder": PIN}, "provider_order": ["openrouter", "gemini"
 
 def test_get_returns_tracked_defaults(client: TestClient, root: Path) -> None:
     body = client.get("/api/settings").json()
+    assert body["warnings"] == []
+    kinds = {p["provider"]: p["kind"] for p in body["providers"]}
+    assert kinds["mock"] == "mock" and kinds["gemini"] == "openai_compatible"
     assert chain(body, "coder")[0] == ("gemini", "gemini-3.8-flash")
     assert body["provider_order"] == []
     assert all(a["override"] is None for a in body["agents"])
@@ -203,10 +206,14 @@ def test_a_bad_overrides_file_falls_back_to_defaults_with_a_warning(
     body = client.get("/api/settings").json()
     assert chain(body, "coder")[0] == ("gemini", "gemini-3.8-flash")
     assert all(a["override"] is None for a in body["agents"])
+    # the screen says why, naming the file (D31)
+    assert len(body["warnings"]) == 1
+    assert str(path) in body["warnings"][0] and "ignored" in body["warnings"][0]
     # a PUT still validates strictly, and {} repairs the file
     stale = {"agents": {"coder": {"provider": "groq", "model": "retired-model"}}}
     assert client.put("/api/settings", json=stale).status_code == 422
-    assert client.put("/api/settings", json={}).status_code == 200
+    repaired = client.put("/api/settings", json={})
+    assert repaired.status_code == 200 and repaired.json()["warnings"] == []
     caplog.clear()
     Registry.load(Settings.from_root(root))
     assert not caplog.records

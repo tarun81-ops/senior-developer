@@ -43,10 +43,17 @@ export default function ApprovalDialog({ client, run, open, onClose }) {
     }
   }
 
+  // Escape closes the dialog without deciding; the run keeps waiting and the
+  // run view offers to reopen it. The native "close" event is queued, not
+  // synchronous: after "Decide later" then a quick "Review and decide", the
+  // first close's event arrives after the reopen. It only counts if the
+  // dialog is still closed when it lands, or it would close the reopened one.
+  const handleCloseEvent = () => {
+    if (!dialog.current?.open) onClose();
+  };
+
   return (
-    // Escape closes the dialog without deciding; the run keeps waiting and
-    // the run view offers to reopen it.
-    <dialog ref={dialog} className="approval" aria-labelledby="approval-title" onClose={onClose}>
+    <dialog ref={dialog} className="approval" aria-labelledby="approval-title" onClose={handleCloseEvent}>
       <h2 id="approval-title">{TITLES[gate.gate] ?? `Approve ${gate.gate}?`}</h2>
       {gate.gate === "execution" ? <CommandDetails payload={gate.payload} /> : <StageOutput run={run} gate={gate} />}
       <label className="field">

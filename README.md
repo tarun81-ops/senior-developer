@@ -208,7 +208,7 @@ actually bound. There is no `--host` flag: the bind is always `127.0.0.1`.
 | `GET /api/projects` | Project folders under `workspace/`: names, file counts, timestamps; never paths outside it or file contents. |
 | `GET /api/events?run_id=&after_seq=` | Replay persisted events (D7 contract, stored in SQLite). |
 | `GET /api/events/stream?run_id=&after_seq=` | Live SSE (`text/event-stream`): replays events after the cursor, then streams new ones, then closes after the run's `api.run_succeeded` / `api.run_failed` / `api.run_cancelled` event. Each frame's `id:` is its `seq`; reconnect with the last one as `after_seq` (or `Last-Event-ID`) for no gap and no repeat. Read it with `fetch()`, not `EventSource`, so `X-API-Key` is sent (D19, D23). |
-| `GET /api/settings` | Effective model chain per agent, providers and their models, provider order, and each expected key as `set` / `missing` (never a value). |
+| `GET /api/settings` | Effective model chain per agent, providers (with `kind`, where `mock` marks the offline ones) and their models, provider order, each expected key as `set` / `missing` (never a value), and `warnings`, e.g. that a corrupt saved-settings file was ignored (D31). |
 | `PUT /api/settings` | Replace the local overrides: `{"agents": {"coder": {"provider": "groq", "model": "..."}}, "provider_order": ["groq", "gemini"]}`. Unknown names are `422`. `{}` resets to the tracked defaults. Applies from the next run (D22). |
 | `PUT /api/settings/keys` | Write-only: `{"keys": {"GEMINI_API_KEY": "..."}}` goes to `.env`; the response reports `set` / `missing` only. |
 
@@ -241,8 +241,8 @@ phases, each ending with something you can run:
 | B2 | Create a run + live event timeline | **done** |
 | B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | **done** |
 | B4 | Task board + read-only file viewer | **done** |
-| B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | next |
-| B6 | Run history + polish | |
+| B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | **done** |
+| B6 | Run history + polish | next |
 
 Install and run (PowerShell, from the repo root; Node 20+ and the `.venv`
 from the Quickstart):
@@ -258,7 +258,8 @@ npm test           # client, form rules, bundle check, shell vs a real backend (
 npm run smoke      # real Electron: security checks, then drives offline mock runs
                    # through the UI: success, cancel at a gate, and all three
                    # approval dialogs (approve plan + architecture, reject execution),
-                   # the task board, and the file viewer on a hostile file
+                   # the task board, the file viewer on a hostile file, and
+                   # settings (ignored-file warning, pin, reorder, reset, key)
 ```
 
 What B2 gives you:
@@ -300,6 +301,22 @@ What B4 gives you: each run has three tabs.
   a file to read it. Contents are always plain text, never rendered, whatever
   the file type, so a model-written `.md` or `.html` file cannot inject
   anything.
+
+What B5 gives you: a **Settings** screen, next to **Runs** in the header.
+
+- **Models.** Each agent has a first-choice model picker. Its configured
+  fallbacks stay behind the pick, and the table shows the exact chain the
+  next run will use. The offline mock appears only in development builds.
+- **Provider order.** Move providers up and down to change which one each
+  agent's chain tries first. **Save model settings** applies from the next
+  run; **Reset to defaults** clears every saved choice.
+- **API keys.** Write-only password fields that save to `.env`. After saving,
+  a key is only ever shown as `set` or `missing`, and the field is cleared.
+- **Ignored-settings warning.** If `data/settings.local.yaml` is corrupt or
+  names something that no longer exists, runs quietly use the defaults
+  (D22). The **Settings** tab gets a red **!** from startup, and the screen
+  names the file and the reason. Saving replaces the file and clears the
+  warning.
 - **Developer menu.** In development builds (`npm run dev`) a **Developer**
   menu offers the offline mock model, so you can try runs without spending
   quota. Production builds (`npm start`) don't contain it, and a test builds
@@ -370,8 +387,10 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   src/SafeMarkdown.js   sanitizing markdown renderer: no HTML, no links, no images
   src/TaskBoard.jsx     stage cards, test result, budget
   src/FilesView.jsx     file list + read-only plain-text viewer
+  src/SettingsView.jsx  models, provider order, write-only keys, warnings
+  src/settingsModel.js  settings rules: pickable providers, request body, keys
   test/                 node --test: client, form rules, bundle, hostile markdown, shell
-docs/DECISIONS.md       why each decision was made (D1–D30)
+docs/DECISIONS.md       why each decision was made (D1–D31)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -386,10 +405,10 @@ workspace/              where generated apps will live — git-ignored
 ```
 
 ```powershell
-cd desktop; npm test                       # 34 tests: stream client, form rules, production
+cd desktop; npm test                       # 41 tests: stream client, form/settings rules, production
                                            # bundle has no mock model, hostile markdown,
                                            # shell vs a real backend
-npm run smoke                              # real Electron: 36 steps, exits 0/1
+npm run smoke                              # real Electron: 50 steps, exits 0/1
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -457,7 +476,10 @@ data in prompts.
   log, cancel, development-only mock model (D28). B3 done: approval dialogs
   for all three gates, sanitized markdown with no clickable links, verbatim
   command/folder/time limit at the execution gate (D29). B4 done: task board,
-  read-only file viewer, two sandboxed read-only file routes (D30). Next: B5.
+  read-only file viewer, two sandboxed read-only file routes (D30). B5 done:
+  Settings screen (first-choice model per agent, provider order, write-only
+  keys, ignored-settings warning), and a fix for an approval-dialog race
+  (D31). Next: B6.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

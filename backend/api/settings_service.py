@@ -34,7 +34,7 @@ def snapshot(settings: Settings) -> SettingsResponse:
     A stale or corrupt overrides file reads as no overrides (the defaults the
     next run will really use), so the UI can still load and fix it.
     """
-    registry, overrides = Registry.load_effective(settings)
+    registry, overrides, warning = Registry.load_effective(settings)
     return SettingsResponse(
         agents=[
             AgentSettings(
@@ -48,6 +48,7 @@ def snapshot(settings: Settings) -> SettingsResponse:
             ProviderSettings(
                 provider=name,
                 label=spec.label or name,
+                kind=spec.kind,
                 models=sorted(spec.models),
                 requires_key=spec.requires_key,
                 api_key_env=spec.api_key_env,
@@ -59,6 +60,7 @@ def snapshot(settings: Settings) -> SettingsResponse:
             spec.api_key_env: "set" if registry.api_key_for(spec) else "missing"
             for spec in _keyed(registry)
         },
+        warnings=[warning] if warning else [],
     )
 
 

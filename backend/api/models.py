@@ -501,6 +501,9 @@ class ProviderSettings(BaseModel):
 
     provider: str
     label: str
+    #: "mock" for the offline providers, which the UI keeps out of its
+    #: normal model lists (D27)
+    kind: str
     models: list[str]
     requires_key: bool
     api_key_env: str
@@ -516,6 +519,9 @@ class SettingsResponse(BaseModel):
     provider_order: list[str]
     #: expected key variable -> "set" / "missing"; values are never included
     keys: dict[str, KeyStatus]
+    #: problems the user should see, e.g. a saved overrides file that was
+    #: ignored because it is corrupt or names something that no longer exists
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SettingsUpdateRequest(LocalOverrides):

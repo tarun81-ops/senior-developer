@@ -119,6 +119,10 @@ function smokeRoot() {
   const tests = path.join(root, "workspace", "smoke-gates", "tests");
   fs.mkdirSync(tests, { recursive: true });
   fs.writeFileSync(path.join(tests, "test_ok.py"), "def test_ok():\n    pass\n");
+  // A corrupt saved-settings file: runs must still work on the defaults, and
+  // the UI must say the file was ignored (D31).
+  fs.mkdirSync(path.join(root, "data"), { recursive: true });
+  fs.writeFileSync(path.join(root, "data", "settings.local.yaml"), "agents: [not valid yaml\n");
   // Hostile content for the file viewer: it must show this as inert text.
   fs.writeFileSync(
     path.join(root, "workspace", "smoke-gates", "notes.md"),

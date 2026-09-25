@@ -45,6 +45,9 @@
     await fetch("http://127.0.0.1:1/").catch(() => {}); // loopback port 1: nothing real is contacted
     await new Promise((r) => setTimeout(r, 100));
     step("CSP blocks other origins", violated === "connect-src", violated);
+    // the smoke root starts with a corrupt data/settings.local.yaml (main.cjs)
+    step("Settings is flagged from startup when saved settings were ignored",
+      Boolean(await until(() => $(".screens .badge"), "the settings badge")));
 
     // -- B2: the form's defaults (D27) ---------------------------------------
     step("execution gate on by default", checkbox("gate-execution").checked);
@@ -161,6 +164,63 @@
     step("hostile file content is shown as text", content.textContent.includes('<img src=x onerror=')
       && content.textContent.includes("<script>"));
     step("and none of it became markup", !$(".file-view").querySelector("img, script, a, h1") && document.title !== "pwned");
+
+    // -- B5: settings -----------------------------------------------------------
+    const nav = (label) => [...document.querySelectorAll(".screens button")].find((b) => b.textContent.startsWith(label));
+    const choose = (select, value) => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    // click a Models button and wait for that save to finish (not a previous one)
+    const models = () => $('section[aria-label="Models"]');
+    const saveWith = async (label) => {
+      const before = Number(models().dataset.saves);
+      [...models().querySelectorAll("button")].find((b) => b.textContent === label).click();
+      await until(() => Number(models()?.dataset.saves) > before, `the "${label}" result`);
+      return models().querySelector(".ok, .error");
+    };
+    nav("Settings").click();
+    const warning = await until(() => $(".warning"), "the ignored-settings warning");
+    step("the warning names the ignored file", /settings\.local\.yaml/.test(warning.textContent) && /ignored/.test(warning.textContent));
+    // (runs 1-3 above already succeeded with this corrupt file present)
+
+    const coder = await until(() => $('select[name="pin-coder"]'), "the coder's model picker");
+    const values = [...coder.options].map((o) => o.value);
+    step("the development menu build offers the mock model", values.includes("mock/mock-echo"));
+    const pick = values.find((v) => v.startsWith("groq/"));
+    step("real models are offered", Boolean(pick), values.length);
+    choose(coder, pick);
+    const result = await saveWith("Save model settings");
+    step("saving model settings succeeds", result.classList.contains("ok"), result.textContent);
+    step("the ignored-settings warning is gone after saving", !$(".warning") && !$(".screens .badge"));
+    const chain = () => $('tr[data-agent="coder"] [data-field="chain"]').textContent;
+    step("the next run's chain starts with the pinned model", chain().startsWith(pick), chain());
+
+    const order = () => [...document.querySelectorAll(".provider-order li")].map((li) => li.dataset.provider);
+    const before = order();
+    $(`.provider-order li[data-provider="${before[1]}"] button[aria-label^="Move"][aria-label$="up"]`).click();
+    await until(() => order()[0] === before[1], "the reorder").catch(() => {});
+    step("↑ moves a provider up", order()[0] === before[1] && order()[1] === before[0], order());
+    await saveWith("Save model settings");
+    step("the saved order comes back from the API", order()[0] === before[1], order());
+
+    await saveWith("Reset to defaults");
+    step("reset returns every agent to its configured default",
+      [...document.querySelectorAll('select[name^="pin-"]')].every((s) => s.value === ""));
+
+    const FAKE_KEY = "AIza-smoke-fake-key-0123456789";
+    const keyInput = $('input[name="key-GEMINI_API_KEY"]');
+    step("key fields are password fields", keyInput.type === "password");
+    type(keyInput, FAKE_KEY);
+    const keysForm = () => $('form[aria-label="API keys"]');
+    const keySaves = Number(keysForm().dataset.saves);
+    [...keysForm().querySelectorAll("button")].find((b) => b.textContent === "Save keys").click();
+    await until(() => Number(keysForm().dataset.saves) > keySaves, "the key save result");
+    step("the key is saved and shown only as set",
+      $('[data-key="GEMINI_API_KEY"] .key-status').textContent === "set", $('form[aria-label="API keys"] p.ok, form[aria-label="API keys"] p.error')?.textContent);
+    step("the key is gone from the page",
+      !document.body.innerText.includes(FAKE_KEY)
+      && [...document.querySelectorAll("input")].every((i) => i.value !== FAKE_KEY));
   } catch (err) {
     report.error = err.message;
     // what the screen looked like when it failed

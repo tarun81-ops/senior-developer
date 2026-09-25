@@ -739,11 +739,67 @@ button.
 no approval dialog for a run that is waiting, until the next event. A
 failed read is now retried every second while it is still the newest. The
 smoke failed once in 19 hidden-window runs with exactly that symptom. The
-cause was not proven, but this was the one path that could produce it. The
-smoke now records the page state on any failure.
+retry is still right, but it was not the cause. The real cause was found in
+B5: a queued dialog `close` event, see D31. The smoke now records the page
+state on any failure.
 
 **Cost accepted:** no syntax highlighting, no editing, and no view of files
 outside the run's own folder. Large files show only their first 256 KiB.
+
+---
+
+## D31 — Settings screen; the settings API reports ignored overrides; dialog close race fixed (Phase 4, Part B)
+
+**Decision:**
+
+* **Settings screen.** A Settings screen next to Runs has three parts.
+  * *Models.* A first-choice model per agent (the `AgentPin` of D22), with
+    the full chain the next run will use shown beside it.
+  * *Provider order.* Up and down buttons, not drag and drop. The order is
+    sent only if it was changed here, so opening and saving the screen never
+    rewrites a setting you did not touch. An existing pin that is not in
+    the list (e.g. the mock, pinned in development) stays selectable for the
+    same reason.
+  * *API keys.* Write-only password fields. Keys are sent once, the fields
+    are cleared, and only `set` or `missing` is shown back.
+  * The offline mock providers (`kind: "mock"`) are left out of the model
+    lists outside development (D27).
+* **Rules module.** The rules live in `src/settingsModel.js` and are
+  unit-tested (7 tests).
+* **API additions.**
+  * `SettingsResponse` gains `warnings` and each provider's `kind`.
+  * `Registry.load_effective` now also returns why saved overrides were
+    ignored. Its two callers were updated.
+  * The Settings tab shows a red **!** from startup while there is a
+    warning, and the screen names the file and the reason. Runs keep
+    working on the defaults meanwhile, as D22 intended, and the smoke test
+    proves it by running with a corrupt file present from the start.
+* **Save feedback.** The save message is kept outside the component that
+  remounts from each saved result; before, the "Saved" message vanished
+  immediately. Each section counts finished saves (`data-saves`), so a new
+  result can be told apart from the previous one.
+* **Approval-dialog race.** The race behind the intermittent smoke failure
+  of B4 is fixed. A `<dialog>`'s `close` event is queued, not synchronous.
+  After **Decide later** followed quickly by **Review and decide**, the first
+  close's event arrived after the reopen, marked the wait as dismissed, and
+  closed the reopened dialog, leaving a waiting run with no dialog. The
+  handler now counts a `close` event only if the dialog is still closed
+  when it arrives.
+  * *How it was found.* The smoke's failure snapshot showed the dialog
+    present but closed. A temporary trace of every open, close and dismiss
+    showed the stale event landing after the reopen.
+  * *Result.* 12 of 12 smoke runs passed after the fix; the last batch
+    before it failed 2 of 3.
+
+**Why:** settings are where a user fixes a broken configuration, so the
+screen must work when the saved file is broken, say so plainly, and never
+change anything the user did not touch. The dialog race is exactly the kind
+of bug that makes a waiting run look stuck. It was found because the smoke
+records the page state when it fails, instead of just being retried.
+
+**Cost accepted:** no drag-and-drop ordering, no per-key delete (D22), and
+the provider order list includes every non-mock provider, even ones no
+agent uses.
 
 ---
 
@@ -755,6 +811,6 @@ outside the run's own folder. Large files show only their first 256 KiB.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B4 done, B5 next) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B5 done, B6 next) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 
