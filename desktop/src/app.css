@@ -1,0 +1,9 @@
+/* Functional first (D26): layout and legibility only, no theming yet. */
+body { margin: 0; font-family: system-ui, sans-serif; }
+.shell { max-width: 1000px; margin: 0 auto; padding: 16px; }
+.shell header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.shell h1 { font-size: 20px; }
+.status { padding: 2px 10px; border-radius: 999px; background: #eee; }
+.status[data-connection="ok"] { background: #d9f5df; }
+.status[data-connection="error"] { background: #fde2e1; }
+.error { color: #b3261e; white-space: pre-wrap; }

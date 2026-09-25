@@ -264,7 +264,7 @@ An Electron page loaded over `file://` sends `Origin: null`, which every
 sandboxed iframe and `data:` page also sends, so `null` is refused. `sda`
 ("senior developer agents") is a custom protocol that Part B registers before
 `app.ready` with `protocol.registerSchemesAsPrivileged` (`standard`, `secure`,
-`supportFetchAPI`, `corsEnabled`), serving `ui/dist` from `sda://app/`. A
+`supportFetchAPI`, `corsEnabled`), serving `desktop/dist` from `sda://app/`. A
 standard scheme's origin is `scheme://host`, so the renderer sends exactly
 `sda://app`. The allowlist matches it exactly, and the Origin check and CORS
 share one list: an earlier version accepted any `sda://` host in the check but
@@ -490,6 +490,112 @@ the point. The e2e tests start a server per test (about a second each).
 
 ---
 
+## D25 — Desktop shell: the shell makes the token and hands it over stdin (Phase 4, Part B)
+
+**Decision:** the Electron main process generates the per-launch token
+(`crypto.randomBytes(32)`, base64url) and starts the backend as
+`python -m backend.api --port 0 --token-stdin --exit-with-stdin`.
+
+* **Token.** It is written as the first line of the child's stdin. The
+  launcher refuses anything that is not a 43–128 character URL-safe string,
+  and prints nothing secret in this mode.
+* **Port.** The launcher binds and listens on `127.0.0.1:0` before announcing
+  it, then prints exactly one line: `SDA_READY {"port": N}`. That is the only
+  thing the shell reads from stdout. After it, stdout is drained unread, and
+  the port must be an integer from 1 to 65535.
+* **Failure.** If the process cannot start, exits, or stays silent for 30 s
+  before `SDA_READY`, startup is rejected immediately with the exit code and
+  the end of stderr, and the app shows that error instead of hanging. A
+  backend that dies after startup is reported the same way.
+* **Lifetime.** stdin stays open as the backend's lifeline. On quit the shell
+  closes it; the launcher sees EOF and stops like Ctrl+C would (running
+  commands are cancelled and their trees killed, D20). The shell hard-kills
+  only after 8 s. If the shell crashes, the pipe closes by itself. This was
+  verified by force-killing Electron: the backend exited on its own.
+* Run by hand, `python -m backend.api` keeps generating and printing a token
+  for curl.
+
+**Why:** the token is the control that makes "approve this command" safe
+(D17), so it should be created by the party that needs it and handed over
+deliberately, not scraped from a log line. Other processes of the same user
+can read argv and environment variables. A pipe between parent and child is
+readable only by those two processes. A dynamic port avoids "port in use",
+and binding before announcing means a client that connects immediately is
+never refused. A stdin lifeline works on Windows, where there is no graceful
+signal to send a child, and it also covers a crashed parent.
+
+**Cost accepted:** development needs the repo's `.venv` (or `SDA_PYTHON`).
+Bundling Python into an installer is a packaging step that is not designed
+yet.
+
+## D26 — Renderer security: two values across the bridge, CSP, nothing else (Phase 4, Part B)
+
+**Decision:**
+
+* **Window.** One window with `contextIsolation: true`, `sandbox: true`,
+  `nodeIntegration: false` and `webviewTag: false`. Navigation away from our
+  page is blocked, `window.open` is denied, webviews cannot attach, and every
+  permission request is denied. The app menu and DevTools exist only in
+  development.
+* **Bridge.** The preload exposes exactly one function,
+  `sda.connection()`, which returns `{ baseUrl, token }`. The IPC handler
+  answers only our own top-level page (`sda://app/…`, or the Vite URL in
+  development). The renderer never sees paths, Node, `ipcRenderer` or
+  anything else.
+* **Serving.** `sda://app` serves only files inside `desktop/dist` (other
+  hosts, traversal and missing files are a 404). Every response carries
+  `X-Content-Type-Options: nosniff` and the CSP
+  `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src <API base URL>; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'`.
+  There is no `'unsafe-inline'` anywhere. Styles come from a stylesheet, and
+  React's style props go through the CSSOM, which the CSP allows.
+* **Checks.** `npm run smoke` runs real Electron and verifies from inside the
+  page that:
+  * it connected;
+  * its origin is `sda://app`;
+  * `require` and `process` are absent;
+  * `window.sda` has exactly one key;
+  * a fetch to any other origin is stopped by `connect-src`. The test uses
+    loopback port 1, so nothing real is contacted.
+
+**Why:** the renderer shows model-authored text and holds the button that
+approves running a command. Anything that runs script there would have the
+token. So the renderer gets the least possible: no Node, a two-value bridge,
+and a CSP under which injected markup can neither run script nor send data
+anywhere except the API.
+
+**Cost accepted:** no inline styles or scripts, no remote fonts or images,
+and no DevTools in the built app. Development uses Vite's server without the
+CSP header, because hot reload injects inline styles. The smoke test runs
+against the built files, which do get the CSP.
+
+## D27 — UI rules fixed before any screen is built (Phase 4, Part B)
+
+**Decision:** four rules every screen follows:
+
+1. **The execution gate is on by default** for every new run. The new-run
+   form starts with it checked every time and never remembers it as off.
+2. **The offline mock model is available only in a development-only menu.**
+   The menu is compiled into development builds and left out of production
+   builds; it never appears in the normal model lists.
+3. **Model-written markdown is rendered with a well-known sanitizing
+   renderer.** `react-markdown` builds React elements, with no raw-HTML plugin,
+   so HTML in model output is dropped. **Links are rendered as plain,
+   non-clickable text.** Clickable links, if ever wanted, are a separate,
+   deliberately reviewed feature.
+4. **Functional before visual.** No theming or animation until the screens
+   work.
+
+**Why:** these guard the approval gates. A defaulted-off execution gate, a
+mock model picked by accident, or a model-authored link or script shown next
+to "Approve" are each a way to get a human to approve something they did not
+read.
+
+**Cost accepted:** the new-run form has one checkbox you must untick every
+time you want to skip the execution gate, and links in plans must be copied
+by hand.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -498,6 +604,6 @@ the point. The e2e tests start a server per test (about a second each).
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B, the desktop UI, next) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1 shell done, B2 next) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

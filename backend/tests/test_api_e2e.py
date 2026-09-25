@@ -11,8 +11,11 @@ token, the bind is loopback-only, no response ever contains a key value).
 
 from __future__ import annotations
 
+import io
 import json
+import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -244,15 +247,86 @@ def test_every_api_route_requires_the_token(server: str, method: str, path: str)
         assert response.status_code == 401, (method, path, headers)
 
 
-def test_the_launcher_binds_loopback_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict] = []
-    monkeypatch.setattr(launcher, "create_app", lambda **_kw: object())
-    monkeypatch.setattr(launcher.uvicorn, "run", lambda _app, **kw: calls.append(kw))
+class FakeServer:
+    """Stands in for uvicorn.Server: records the sockets it would serve."""
+
+    bound: list[tuple[str, int]] = []
+
+    def __init__(self, _config: object) -> None:
+        FakeServer.bound = []
+
+    def run(self, sockets: list) -> None:
+        FakeServer.bound = [s.getsockname() for s in sockets]
+        for s in sockets:
+            s.close()
+
+
+@pytest.fixture
+def fake_launch(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Run launcher.main without serving; returns the kwargs create_app got."""
+    seen: dict = {}
+    monkeypatch.setattr(launcher, "create_app", lambda **kw: seen.update(kw) or object())
+    monkeypatch.setattr(launcher.uvicorn, "Server", FakeServer)
+    return seen
+
+
+def test_the_launcher_binds_loopback_only(
+    fake_launch: dict, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert launcher.main(["--port", "0"]) == 0
-    assert calls[0]["host"] == "127.0.0.1"
-    # there is no flag that could change it
+    host, port = FakeServer.bound[0]
+    assert host == "127.0.0.1" and port > 0
+    # by hand: the real port (never the requested 0) and a token for curl
+    out = capsys.readouterr().out
+    assert f"Serving on http://127.0.0.1:{port} " in out
+    assert fake_launch["token"] in out
+    # there is no flag that could change the host
     with pytest.raises(SystemExit):
         launcher.main(["--host", "0.0.0.0"])
+
+
+def test_token_stdin_uses_the_shells_token_and_prints_only_the_port(
+    fake_launch: dict, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = "t" * 43
+    monkeypatch.setattr(sys, "stdin", io.StringIO(token + "\n"))
+    assert launcher.main(["--port", "0", "--token-stdin"]) == 0
+    assert fake_launch["token"] == token
+    out = capsys.readouterr().out
+    assert out == f'SDA_READY {{"port": {FakeServer.bound[0][1]}}}\n'
+    assert token not in out
+
+
+@pytest.mark.parametrize("line", ["", "short", "has space" + "x" * 40, "x" * 200])
+def test_token_stdin_refuses_a_bad_token(
+    fake_launch: dict, monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(line + "\n"))
+    assert launcher.main(["--port", "0", "--token-stdin"]) == 2
+    assert not fake_launch  # no app was built, nothing was served
+
+
+def test_the_desktop_launch_contract_end_to_end(root: Path) -> None:
+    """The real process, started the way the Electron shell starts it."""
+    token = secrets.token_urlsafe(32)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "backend.api", "--port", "0", "--root", str(root),
+         "--token-stdin", "--exit-with-stdin"],
+        cwd=PACKAGE_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        proc.stdin.write(token + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        assert line.startswith("SDA_READY ") and token not in line
+        base = f"http://127.0.0.1:{json.loads(line.split(' ', 1)[1])['port']}"
+        assert httpx.get(base + "/api/health", headers={"X-API-Key": token}).status_code == 200
+        assert httpx.get(base + "/api/health").status_code == 401
+        proc.stdin.close()  # the shell quits: the lifeline closes
+        assert proc.wait(timeout=15) == 0  # a graceful exit, not a kill
+    finally:
+        if proc.poll() is None:
+            proc.kill()
 
 
 def test_no_response_ever_contains_a_key_value(

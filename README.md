@@ -17,8 +17,9 @@ crash.
 > `workspace/<project>/`, the tester's own command is run there, and failing
 > tests drive another coder round just like a review objection.
 > **Phase 4 wraps that pipeline in a local FastAPI server** for the Electron
-> desktop UI (see [Local API](#local-api-phase-4--in-progress)); the API layer
-> is being built in reviewed steps.
+> desktop UI (see [Local API](#local-api-phase-4-part-a--done) and
+> [Desktop app](#desktop-app-phase-4-part-b--in-progress)). The API is done;
+> the desktop UI is being built in reviewed phases.
 
 ---
 
@@ -162,7 +163,7 @@ and update `config/providers.yaml` / `config/agents.yaml` if an id 404s.
 
 ## Local API (Phase 4, Part A — done)
 
-The same pipeline, over HTTP, for the desktop UI (Part B, not built yet). Part A
+The same pipeline, over HTTP, for the desktop UI (Part B, below). Part A
 is complete: foundations, run queue, approval gates, settings, the SSE stream,
 and end-to-end tests that drive a whole gated run the way the UI will.
 
@@ -227,6 +228,58 @@ and are never returned by any endpoint.
 
 ---
 
+## Desktop app (Phase 4, Part B — in progress)
+
+`desktop/` is the Electron shell plus the React/Vite UI. It is built in
+phases, each ending with something you can run:
+
+| Phase | What you get | Status |
+|---|---|---|
+| B1 | App shell: backend launch, token handoff, `sda://app` serving, health shown in the window | **done** |
+| B2 | Create a run + live event timeline | next |
+| B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | |
+| B4 | Task board + read-only file viewer | |
+| B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | |
+| B6 | Run history + polish | |
+
+Install and run (PowerShell, from the repo root; Node 20+ and the `.venv`
+from the Quickstart):
+
+```powershell
+cd desktop; npm install
+```
+
+```powershell
+npm start          # build the UI and open the app
+npm run dev        # development: Vite hot reload + Electron
+npm test           # shell tests against a real backend (offline)
+npm run smoke      # real Electron: checks origin, no Node, bridge, CSP; exits 0/1
+```
+
+How it fits together (D25, D26):
+
+- **Starting the backend.** The shell generates the per-launch token itself
+  and starts `python -m backend.api --port 0 --token-stdin --exit-with-stdin`
+  from `.venv` (override the interpreter with `SDA_PYTHON`).
+  - The token goes in as the first line of the backend's stdin. It is never
+    in argv, the environment, a file or any output.
+  - The backend answers with one line, `SDA_READY {"port": N}`, which is the
+    only thing the shell reads from its stdout.
+  - If the backend exits or stays silent before that line, the app reports
+    the error with the end of its stderr instead of hanging. If the backend
+    dies later, the app reports that too.
+- **Shutting down.** Closing the app closes the backend's stdin, so the API
+  shuts down gracefully and stops any running command. It also exits by
+  itself if the app crashes.
+- **Serving the UI.** It is served from `sda://app` (Vite on `127.0.0.1:5173`
+  in development).
+- **What the page can do.** Context isolation and the sandbox are on, and Node
+  integration is off. A strict CSP limits the page to its own files and the
+  API's address. The page's only bridge is `sda.connection()`, which returns
+  `{ baseUrl, token }` and nothing else.
+
+---
+
 ## Project layout
 
 ```
@@ -253,8 +306,14 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                238 tests, no network, no keys required
-docs/DECISIONS.md       why each decision was made (D1–D24)
+  tests/                244 tests, no network, no keys required
+desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
+  electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
+  electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
+  electron/preload.cjs  the page's only bridge: connection() -> { baseUrl, token }
+  src/                  React UI (B1: connection + health)
+  test/                 node --test against a real backend
+docs/DECISIONS.md       why each decision was made (D1–D27)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -265,7 +324,12 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 238 tests, ~50s, offline
+.\.venv\Scripts\python -m pytest          # 244 tests, ~50s, offline
+```
+
+```powershell
+cd desktop; npm test                       # 7 tests: shell launch against a real backend
+npm run smoke                              # real Electron window checks, exits 0/1
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -318,13 +382,17 @@ data in prompts.
   timeout, truncated capture), test failures feeding the fix loop, `run`
   command for zero-cost re-runs, 138 tests.
 - **Phase 4 (in progress)** — FastAPI backend + React/Vite + Electron desktop UI.
-  **Part A (the API) is done**; Part B (the desktop UI) is next. Step 1 done: loopback-bound API with per-launch token, Host/Origin checks,
+  **Part A (the API) is done.** Step 1 done: loopback-bound API with
+  per-launch token, Host/Origin checks,
   request-size cap and SQLite-backed event replay (`data/app.db`, D17/D18).
   Steps 2–4 done: FIFO run queue with cancel (D20), approval gates (D21),
   settings with git-ignored local overrides and write-only keys (D22).
   Step 5 done: SSE event stream with cursor resume (D19, D23).
   Step 6 done: end-to-end tests over a real server, security pass, pinned
   API surface (D24).
+  **Part B (the desktop UI) is in progress.** B1 done: app shell, backend
+  launch with the token over stdin and `SDA_READY`, `sda://app` serving,
+  locked-down renderer with CSP, health in the window (D25–D27). Next: B2.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

@@ -1,0 +1,24 @@
+{
+  "name": "senior-developer-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Electron shell and React UI for the Senior Developer Agents API",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "smoke": "vite build && electron . --smoke",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.4.5",
+    "vite": "^8.3.1"
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}

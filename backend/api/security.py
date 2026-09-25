@@ -35,7 +35,7 @@ API_KEY_HEADER = "X-API-Key"
 #:   agents") is a custom protocol that Part B registers in Electron *before*
 #:   ``app.ready`` with ``protocol.registerSchemesAsPrivileged`` and the
 #:   privileges ``standard``, ``secure``, ``supportFetchAPI`` and
-#:   ``corsEnabled``, then serves ``ui/dist`` from ``sda://app/…``. A standard
+#:   ``corsEnabled``, then serves ``desktop/dist`` from ``sda://app/…``. A standard
 #:   scheme gives the renderer a real origin, ``scheme://host``; loading over
 #:   ``file://`` would report ``Origin: null`` instead, which every sandboxed
 #:   iframe and ``data:`` page also sends, so ``null`` stays denied. Part B
