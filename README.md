@@ -160,11 +160,11 @@ and update `config/providers.yaml` / `config/agents.yaml` if an id 404s.
 
 ---
 
-## Local API (Phase 4 — in progress)
+## Local API (Phase 4, Part A — done)
 
-The same pipeline, over HTTP, for the desktop UI. It is built in reviewed steps;
-**steps 1–4 are done** (foundations, run queue, approval gates, settings);
-SSE streaming follows.
+The same pipeline, over HTTP, for the desktop UI (Part B, not built yet). Part A
+is complete: foundations, run queue, approval gates, settings, the SSE stream,
+and end-to-end tests that drive a whole gated run the way the UI will.
 
 ```powershell
 .\.venv\Scripts\python -m backend.api --port 8765
@@ -177,19 +177,40 @@ that line and sends it as `X-API-Key` on every request:
 # health check (token required)
 Invoke-RestMethod http://127.0.0.1:8765/api/health -Headers @{ "X-API-Key" = "<token>" }
 
-# replay a run's events (after_seq is the cursor a reconnecting UI sends back)
-Invoke-RestMethod "http://127.0.0.1:8765/api/events?run_id=<run_id>&after_seq=0" `
-  -Headers @{ "X-API-Key" = "<token>" }
+# start a run that pauses for approval before any command runs
+$h = @{ "X-API-Key" = "<token>" }
+$run = Invoke-RestMethod http://127.0.0.1:8765/api/runs -Method Post -Headers $h `
+  -ContentType application/json -Body '{"request": "a CLI todo app", "approval_gates": ["execution"]}'
+
+# watch it live (curl.exe -N disables buffering; the stream ends with the run)
+curl.exe -N -H "X-API-Key: <token>" "http://127.0.0.1:8765/api/events/stream?run_id=$($run.run_id)"
+
+# when it reports waiting_approval, look at the gate, then decide
+Invoke-RestMethod "http://127.0.0.1:8765/api/runs/$($run.run_id)" -Headers $h
+Invoke-RestMethod "http://127.0.0.1:8765/api/runs/$($run.run_id)/approve" -Method Post -Headers $h
 ```
+
+`--port 0` lets the OS pick a free port; `GET /api/health` reports the one
+actually bound. There is no `--host` flag: the bind is always `127.0.0.1`.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health` | Liveness + the port actually bound. Token required. |
+| `GET /api/health` | Liveness + the port actually bound. |
+| `POST /api/runs` | Queue a run (`202`): `{"request": "...", "project"?, "stages"?, "approval_gates"?: ["plan", "architecture", "execution"], "provider"?, "model"?, "override"?, "dry_run"?, "no_apply"?, "no_run_tests"?}`. One run executes at a time; the rest wait in FIFO order (D20). |
+| `GET /api/runs?limit=` | Runs from this process, newest first, plus the active run id. |
+| `GET /api/runs/{run_id}` | Full state: status, queue position, open gate and its payload, board, agent outputs, files written, test results, budget. |
+| `POST /api/runs/{run_id}/cancel` | Cancel: a queued run never starts; a running one stops at the next checkpoint (a running command's process tree is killed); a gate wakes immediately. |
+| `POST /api/runs/{run_id}/approve` | Approve the gate the run is waiting at (`409` if it isn't waiting). Optional `{"note": "..."}`. |
+| `POST /api/runs/{run_id}/reject` | Reject it: the run ends `failed` with reason `rejected` and the note as its error (D21). |
+| `GET /api/projects` | Project folders under `workspace/`: names, file counts, timestamps; never paths outside it or file contents. |
 | `GET /api/events?run_id=&after_seq=` | Replay persisted events (D7 contract, stored in SQLite). |
 | `GET /api/events/stream?run_id=&after_seq=` | Live SSE (`text/event-stream`): replays events after the cursor, then streams new ones, then closes after the run's `api.run_succeeded` / `api.run_failed` / `api.run_cancelled` event. Each frame's `id:` is its `seq`; reconnect with the last one as `after_seq` (or `Last-Event-ID`) for no gap and no repeat. Read it with `fetch()`, not `EventSource`, so `X-API-Key` is sent (D19, D23). |
 | `GET /api/settings` | Effective model chain per agent, providers and their models, provider order, and each expected key as `set` / `missing` (never a value). |
 | `PUT /api/settings` | Replace the local overrides: `{"agents": {"coder": {"provider": "groq", "model": "..."}}, "provider_order": ["groq", "gemini"]}`. Unknown names are `422`. `{}` resets to the tracked defaults. Applies from the next run (D22). |
 | `PUT /api/settings/keys` | Write-only: `{"keys": {"GEMINI_API_KEY": "..."}}` goes to `.env`; the response reports `set` / `missing` only. |
+
+Every route above needs the token; a test enumerates the whole surface and
+fails if a route is added without being listed, tested and documented.
 
 Security is deliberately boring and layered (D17): the server binds
 `127.0.0.1` only, every request must present the per-launch token, the `Host`
@@ -219,6 +240,8 @@ backend/
     event_store.py      EventBus -> repository bridge, sequence numbers, replay
     models.py           Pydantic request/response models
     stream.py           SSE stream: replay from a cursor, then live, then close (D23)
+    run_manager.py      FIFO run queue, cancel, approval gates (D20, D21)
+    settings_service.py settings snapshot, override validation, write-only keys (D22)
     __main__.py         python -m backend.api (binds 127.0.0.1, prints the token)
   core/
     config.py           Settings + .env loading
@@ -230,8 +253,8 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                219 tests, no network, no keys required
-docs/DECISIONS.md       why each decision was made (D1–D23)
+  tests/                238 tests, no network, no keys required
+docs/DECISIONS.md       why each decision was made (D1–D24)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -242,7 +265,7 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 219 tests, ~30s, offline
+.\.venv\Scripts\python -m pytest          # 238 tests, ~50s, offline
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -250,9 +273,14 @@ error classification (via a fake transport), empty-completion handling, agent
 JSON extraction, the event log, the task board, the pipeline (stage order,
 context wiring, fix loop, budget stops), the workspace sandbox (path escapes,
 apply/dry-run/conflicts, command allowlist, timeouts, output truncation), the
-CLI end-to-end against a throwaway project root, and the API foundations (token,
-Host/Origin, body cap, CORS, SQLite event persistence and replay). No test
-touches the network or needs an API key.
+CLI end-to-end against a throwaway project root, and the whole API: token,
+Host/Origin, body cap, CORS, event persistence and replay, the run queue,
+approval gates, settings, and the SSE stream (replay, live handoff, resume,
+close). `test_api_e2e.py` starts a real uvicorn server on an ephemeral loopback
+port and drives full gated runs over HTTP with a streaming client, approving,
+rejecting and cancelling in reaction to stream events, and checks that no
+response ever contains a key value. No test touches the network or needs an
+API key.
 
 ---
 
@@ -290,12 +318,13 @@ data in prompts.
   timeout, truncated capture), test failures feeding the fix loop, `run`
   command for zero-cost re-runs, 138 tests.
 - **Phase 4 (in progress)** — FastAPI backend + React/Vite + Electron desktop UI.
-  Step 1 done: loopback-bound API with per-launch token, Host/Origin checks,
+  **Part A (the API) is done**; Part B (the desktop UI) is next. Step 1 done: loopback-bound API with per-launch token, Host/Origin checks,
   request-size cap and SQLite-backed event replay (`data/app.db`, D17/D18).
   Steps 2–4 done: FIFO run queue with cancel (D20), approval gates (D21),
   settings with git-ignored local overrides and write-only keys (D22).
   Step 5 done: SSE event stream with cursor resume (D19, D23).
-  Next: step 6.
+  Step 6 done: end-to-end tests over a real server, security pass, pinned
+  API surface (D24).
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

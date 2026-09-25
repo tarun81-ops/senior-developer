@@ -465,6 +465,31 @@ active run (D20) that costs nothing.
 
 ---
 
+## D24 — The API surface is pinned by a test; e2e runs use a real server (Phase 4)
+
+**Decision:** Part A closes with two test rules. First, a test compares the
+app's full route list, generated in process from the OpenAPI schema (the
+schema is still never served), to a fixed set of 13 method/path pairs. The
+same set drives a parametrised test asserting `401` without the token and with
+a wrong one. A new route therefore fails the suite until it is listed, which
+puts it under the token test automatically. Second, end-to-end tests run a
+real uvicorn server on an ephemeral `127.0.0.1` port and drive it with a
+streaming `httpx` client, deciding each gate in reaction to the
+`api.run_waiting_approval` event on the stream, as the UI will.
+
+**Why:** the token guard is router-level, so a route mounted outside that
+router would be public and nothing would notice. Pinning the surface turns
+that silent mistake into a failing test. `TestClient` buffers a streaming
+response until the app finishes it, so it can't show that frames reach a
+client while the run is still going, or that a client can act on them
+mid-stream. A real socket on loopback can, and it still spends no quota and
+doesn't touch the network.
+
+**Cost accepted:** adding an endpoint means editing the pinned set, which is
+the point. The e2e tests start a server per test (about a second each).
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -473,6 +498,6 @@ active run (D20) that costs nothing.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 5 of 6: SSE stream) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B, the desktop UI, next) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 
