@@ -25,12 +25,18 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from backend.core.errors import ConfigError
 from backend.core.provider.registry import ExecutionConfig
+
+#: Predicate polled while a command runs. ``True`` means "kill the process tree
+#: now" (D20). ``None`` — what the CLI passes — means the command runs to its
+#: normal completion or timeout.
+CancelCheck = Callable[[], bool]
 
 #: how much of the truncated output to keep from the front vs the back
 _HEAD_SHARE = 0.6

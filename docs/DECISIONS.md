@@ -314,3 +314,65 @@ from the browser, so the client owns that loop. That is deliberate: the
 reconnect policy has to be the same policy the run manager uses when a run dies.
 
 ---
+
+## D20 — Background runs are serialized; the lock is released in `finally` (Phase 4)
+
+**Decision:** the API runs at most **one** pipeline at a time. `RunManager`
+holds a process-wide lock; a second `POST /api/runs` while one is active is
+accepted and queued, and runs execute in submission order. The lock is released
+in a `finally` block, so success, failure, cancellation and an unhandled
+exception all release it.
+
+**Why:** `ProviderRouter` owns a rate-limit ledger, a cooldown table and a
+`QuotaLedger` file, and the registry/router pair is not safe to drive from two
+threads at once — the CLI builds one Runtime per invocation and gets a clean
+process. A desktop app is long-lived and can be asked for a second run while
+the first is still thinking, so the API has to make that safe. Serializing also
+keeps the free-tier quota ledger honest, since two concurrent runs would race
+on the same daily counters.
+
+**Cost accepted:** the UI shows a queue and a single active run; parallel runs
+are not available. If a run hangs, the next one waits — the cancel endpoint
+exists precisely so a human can break that. A future multi-run API needs a
+lock per provider, not per process, and that is a Phase 5 concern.
+
+---
+
+## D21 — Approval gates pause the run; reject fails it, cancel wins (Phase 4)
+
+**Decision:** a run may ask for human approval at three gates: `plan` (after
+the planner), `architecture` (after the architect) and `execution` (before
+every command runs, showing the exact command, working directory and timeout).
+The worker thread blocks on a `threading.Event` while the run's status is
+`waiting_approval`; `POST /api/runs/{id}/approve` and `/reject` resolve it, with
+the token re-checked at the call site (D17) and `409` when the run is not
+waiting. A waiting run **keeps the single active slot** (D20): nobody else can
+run until a human decides, and cancel is the escape hatch. Reject ends the run
+`failed` with `reason: "rejected"` and the human's note as the error text;
+cancel sets the same event a decision would, so it wakes the gate immediately
+(no polling) and wins any race with approve. The CLI never configures gates —
+it injects no hook, so it never pauses.
+
+**Why:** D17 promises an "approve this command" action that cannot be forged
+from a random page; this is where that promise is kept. Blocking the worker
+thread instead of descheduling the pipeline keeps the board, the event log and
+one runtime per run exactly as they are — a pause costs nothing and cannot
+half-run a stage.
+
+**Cost accepted:** a run left at a gate blocks the queue until approved,
+rejected or cancelled (as in D20, the cancel endpoint is the human's lever),
+and the execution gate re-opens for every command, including fix-loop reruns.
+
+---
+
+## Phase plan
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| 0 | Research, provider reality check, architecture decisions | done |
+| 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
+| 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
+| 3 | Workspace execution: generate files, run tests/builds, iterate | done |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 3 of 6: approval gates) |
+| 5 | Deploy generated apps (Vercel + Render) | not started |
+

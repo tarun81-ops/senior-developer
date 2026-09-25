@@ -23,12 +23,20 @@ Design rules this module keeps:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from backend.core.errors import AgentSystemError, ConfigError
-from backend.core.orchestrator.board import TaskBoard
+from backend.core.errors import AgentSystemError, ApprovalRejected, ConfigError, RunCancelled
+from backend.core.orchestrator.board import (
+    BOARD_CANCELLED,
+    BOARD_FAILED,
+    BOARD_RUNNING,
+    BOARD_SUCCEEDED,
+    PENDING,
+    TaskBoard,
+)
 from backend.core.workspace import (
     FILE_STAGES,
     ApplyReport,
@@ -123,6 +131,16 @@ STAGE_SPECS: dict[str, StageSpec] = {
 _APPROVE = {"approve", "approved", "lgtm"}
 _REJECT = {"changes_requested", "changes requested", "revise", "reject", "rejected"}
 
+#: The approval gates a run may request (Phase 4, D21). ``plan`` and
+#: ``architecture`` open when their stage completes; ``execution`` opens before
+#: every command the pipeline is about to run.
+APPROVAL_GATES: tuple[str, ...] = ("plan", "architecture", "execution")
+
+#: gate name -> the stage whose completion opens it
+GATE_AFTER_STAGE: dict[str, str] = {"plan": "planner", "architecture": "architect"}
+#: stage -> gate, the form the run loop looks up
+_STAGE_GATES: dict[str, str] = {stage: gate for gate, stage in GATE_AFTER_STAGE.items()}
+
 
 @dataclass
 class PipelineResult:
@@ -131,7 +149,7 @@ class PipelineResult:
     run_id: str
     goal: str
     ok: bool
-    reason: str  # "ok" | "review" | "tests"
+    reason: str  # "ok" | "review" | "tests" | "cancelled"
     stages: list[str]
     verdict: str | None
     board_path: str
@@ -172,10 +190,14 @@ class Pipeline:
         max_fix_iterations: int | None = None,
         board_path: Path | str | None = None,
         override: list[tuple[Any, Any]] | None = None,
+        agent_overrides: dict[str, list[tuple[Any, Any]]] | None = None,
         project: str | None = None,
         apply_workspace: bool | None = None,
         run_tests: bool | None = None,
         dry_run: bool = False,
+        cancel_check: Callable[[], bool] | None = None,
+        approval_gates: list[str] | None = None,
+        approval_hook: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.runtime = runtime
         config = runtime.registry.pipeline
@@ -196,6 +218,10 @@ class Pipeline:
             # raises ConfigError when the stage's agent is missing from config
             runtime.registry.agent(STAGE_SPECS[name].agent)
         self.override = override
+        #: Phase 4: per-agent routing from the API request
+        #: (``[["coder", "groq", "llama"], …]``). A per-agent entry wins over the
+        #: run-wide ``override`` chain, which is what the CLI's --provider means.
+        self.agent_overrides = dict(agent_overrides or {})
         self.board_path = (
             Path(board_path)
             if board_path
@@ -211,7 +237,24 @@ class Pipeline:
         self.dry_run = dry_run
         self.execution = runtime.registry.limits.execution
         self.workspace = Workspace(runtime.settings.workspace_dir)
-        self.runner = CommandRunner(self.execution)
+        #: Phase 4: the API's cancel flag. Checked between stages and polled by the
+        #: command runner, which kills the process *tree* when it turns true (D20).
+        self.cancel_check = cancel_check
+        self.runner = CommandRunner(self.execution, cancel_check=cancel_check)
+
+        # -- Phase 4: approval gates (D21) ----------------------------------
+        #: gates this run must pause at; empty for the CLI
+        gates = list(approval_gates or [])
+        for name in gates:
+            if name not in APPROVAL_GATES:
+                raise ConfigError(
+                    f"Unknown approval gate '{name}'. Known gates: "
+                    f"{', '.join(APPROVAL_GATES)}"
+                )
+        self.approval_gates = set(gates)
+        #: blocking pause point injected by the API's run manager; ``None`` for
+        #: the CLI, which never asks a human and therefore never pauses
+        self.approval_hook = approval_hook
         self._project = slugify(project) if project else ""
         self._last_apply: ApplyReport | None = None
 
@@ -278,6 +321,16 @@ class Pipeline:
                 "no test command: the tester did not name one and none could be detected",
             )
             return
+        # Phase 4: the execution gate surfaces the exact command, its working
+        # directory and the timeout before anything is started (D21).
+        self._approval(
+            "execution",
+            {
+                "command": command,
+                "cwd": str(project_dir),
+                "timeout_seconds": self.execution.timeout_seconds,
+            },
+        )
         self.runtime.bus.emit(
             "exec.start",
             f"{command}  (from {source})",
@@ -304,6 +357,51 @@ class Pipeline:
             truncated=result.stdout_truncated or result.stderr_truncated,
         )
 
+    # -- approval gates (Phase 4, D21) ---------------------------------------
+    def _approval(self, gate: str, payload: dict[str, Any]) -> None:
+        """Block at an approval gate until a human decides (or cancels).
+
+        A no-op unless this run asked for the gate *and* someone injected a
+        hook — the CLI passes neither, so it never pauses. With a hook, this
+        call blocks the worker thread on the hook's ``threading.Event``: approve
+        and reject resolve it, and cancel sets the same event, so a cancel wakes
+        the gate immediately rather than at the next poll. The hook raises
+        :class:`ApprovalRejected` or :class:`RunCancelled` when it does not
+        return normally.
+        """
+        if gate not in self.approval_gates or self.approval_hook is None:
+            return
+        if self._cancelled():
+            raise RunCancelled(self.runtime.run_id, gate)
+        self.runtime.bus.emit(
+            "approval.waiting",
+            f"waiting for approval: {gate}",
+            gate=gate,
+            project=self._project,
+            **payload,
+        )
+        self.approval_hook(gate, payload)
+        self.runtime.bus.emit("approval.approved", f"{gate} approved", gate=gate)
+
+    # -- cancellation (Phase 4) ----------------------------------------------
+    def _cancelled(self) -> bool:
+        """Has a cancel been requested? ``False`` when nobody is watching (CLI)."""
+        return self.cancel_check is not None and self.cancel_check()
+
+    @staticmethod
+    def _execution_cancelled(board: TaskBoard) -> bool:
+        """Did the last command run end because a cancel killed it?"""
+        last = board.last_execution
+        return bool(last and last.get("cancelled"))
+
+    @staticmethod
+    def _last_started(board: TaskBoard) -> str | None:
+        """The most recent stage that is no longer pending, for ``skip_rest``."""
+        for stage in reversed(board.order):
+            if board.get(stage).status != PENDING:
+                return stage
+        return None
+
     # -- execution ----------------------------------------------------------
     def run(self, goal: str) -> PipelineResult:
         self._project = self._project or slugify(goal)
@@ -313,6 +411,7 @@ class Pipeline:
             stages=self.stages,
             agents={name: STAGE_SPECS[name].agent for name in self.stages},
             project=self._project,
+            status=BOARD_RUNNING,
         )
         board.save(self.board_path)
         bus = self.runtime.bus
@@ -326,13 +425,36 @@ class Pipeline:
             verdict: str | None = None
             for index, stage in enumerate(self.stages):
                 remaining = self.stages[index + 1 :]
+                if self._cancelled():
+                    # Cooperative stop: the pipeline cannot interrupt a provider
+                    # HTTP call in flight, so cancel takes effect at the next
+                    # stage boundary (or immediately, mid-command, via the
+                    # runner's tree kill).
+                    bus.emit("pipeline.cancelled", f"cancelled before {stage}", stage=stage)
+                    board.skip_rest(after=self._last_started(board))
+                    return self._finish(board, ok=False, reason="cancelled", verdict=verdict)
                 context = self._context_for(board, stage, fix=False)
                 self._execute(board, stage, goal=goal, context=context)
                 # Phase 3: real files, then real evidence
                 if stage in FILE_STAGES:
                     self._apply(board)
+                # Phase 4: pause for a human at this stage's gate (D21)
+                gate = _STAGE_GATES.get(stage)
+                if gate is not None:
+                    self._approval(
+                        gate,
+                        {"stage": stage, "output": board.get(stage).text[:4000]},
+                    )
                 if stage == "tester" and self.run_tests:
                     self._run_tests(board)
+                    if self._execution_cancelled(board):
+                        # A cancel killed the command tree mid-run. That is not a
+                        # test failure, so it must not trigger the coder fix loop.
+                        bus.emit("pipeline.cancelled", "cancelled while running tests")
+                        board.skip_rest(after=stage)
+                        return self._finish(
+                            board, ok=False, reason="cancelled", verdict=verdict
+                        )
                 if stage == "reviewer":
                     verdict = self._review_loop(board, goal)
                 stop = self._stop_reason(board, verdict, remaining)
@@ -347,12 +469,30 @@ class Pipeline:
                     board.skip_rest(after=stage)
                     return self._finish(board, ok=False, reason=stop, verdict=verdict)
             return self._finish(board, ok=True, reason="ok", verdict=verdict)
+        except RunCancelled as exc:
+            # Cancelled while blocked at an approval gate: nothing failed, so
+            # no stage is marked failed — the rest is skipped and the board says
+            # cancelled, exactly like a cancel between stages.
+            board.skip_rest(after=self._last_started(board))
+            bus.emit("pipeline.cancelled", str(exc), stage=exc.stage)
+            return self._finish(board, ok=False, reason="cancelled", verdict=verdict)
+        except ApprovalRejected as exc:
+            # A human said no at a gate: not a stage failure either, but not a
+            # cancellation — the run ends ``failed`` with reason "rejected" and
+            # the note travels with it (the API turns it into the error text).
+            board.skip_rest(after=self._last_started(board))
+            bus.emit("approval.rejected", str(exc), gate=exc.gate, note=exc.note)
+            return self._finish(board, ok=False, reason="rejected", verdict=verdict)
         except AgentSystemError as exc:
             failed = board.failed_stage
             if failed is None:  # error outside a stage execution; be defensive
                 failed = self.stages[0]
                 board.fail(failed, error=str(exc))
             board.skip_rest(after=failed)
+            # RunCancelled and ApprovalRejected are handled above; anything here
+            # really did stop the run at a failing stage.
+            board.status = BOARD_FAILED
+            board.save()
             bus.emit("error", str(exc), stage=failed)
             bus.emit(
                 "pipeline.end",
@@ -382,7 +522,7 @@ class Pipeline:
             result = agent.run(
                 self._message_for(stage, goal, fix=fix),
                 context=context or None,
-                override=self.override,
+                override=self.agent_overrides.get(spec.agent) or self.override,
             )
         except AgentSystemError as exc:
             board.fail(stage, error=str(exc))
@@ -513,6 +653,11 @@ class Pipeline:
     def _finish(
         self, board: TaskBoard, *, ok: bool, reason: str, verdict: str | None
     ) -> PipelineResult:
+        # The board's own status, not the stage records': the API's GET reports it
+        # verbatim, so a cancelled run stays visibly cancelled.
+        board.status = BOARD_CANCELLED if reason == "cancelled" else (
+            BOARD_SUCCEEDED if ok else BOARD_FAILED
+        )
         saved = board.save()
         budget = self.runtime.budget.state
         result = PipelineResult(

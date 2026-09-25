@@ -18,6 +18,7 @@ Stage lifecycle::
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,14 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 SKIPPED = "skipped"
+
+#: The board's *own* status, one level above the stage records. The UI reads it
+#: straight from ``GET /api/runs/{id}`` so "the run was cancelled" is visible
+#: even when the last stage record still says ``done``.
+BOARD_RUNNING = "running"
+BOARD_SUCCEEDED = "succeeded"
+BOARD_FAILED = "failed"
+BOARD_CANCELLED = "cancelled"
 
 
 def _now() -> str:
@@ -108,6 +117,7 @@ class TaskBoard:
         executions: list[dict[str, Any]] | None = None,
         created_at: str = "",
         updated_at: str = "",
+        status: str = BOARD_RUNNING,
         path: Path | None = None,
     ) -> None:
         self.run_id = run_id
@@ -115,6 +125,9 @@ class TaskBoard:
         self.path = path
         #: Phase 3: the workspace project folder this run wrote into
         self.project = project
+        #: Phase 4: the run's own lifecycle, one level above the stage records.
+        #: Persisted so a reconnecting UI reads the same answer the API reports.
+        self.status = status or BOARD_RUNNING
         #: Phase 3: command runs (already serialised, so board.py needs no
         #: import from the workspace package and there is no import cycle)
         self.executions: list[dict[str, Any]] = list(executions or [])
@@ -138,9 +151,15 @@ class TaskBoard:
         stages: list[str],
         agents: dict[str, str],
         project: str = "",
+        status: str = BOARD_RUNNING,
     ) -> TaskBoard:
         return cls(
-            run_id=run_id, goal=goal, stages=stages, agents=agents, project=project
+            run_id=run_id,
+            goal=goal,
+            stages=stages,
+            agents=agents,
+            project=project,
+            status=status,
         )
 
     @classmethod
@@ -162,6 +181,7 @@ class TaskBoard:
             ],
             created_at=str(raw.get("created_at") or ""),
             updated_at=str(raw.get("updated_at") or ""),
+            status=str(raw.get("status") or BOARD_RUNNING),
             path=Path(path),
         )
         for stage in board.order:
@@ -187,14 +207,27 @@ class TaskBoard:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(target)
-        return target
+        # On Windows the rename fails with access denied while another thread
+        # holds board.json open — the API's polling GET /api/runs/{id} does
+        # exactly that. Retry briefly instead of turning a read race into a
+        # failed run.
+        attempts = 0
+        while True:
+            try:
+                tmp.replace(target)
+                return target
+            except OSError:
+                attempts += 1
+                if attempts > 5:
+                    raise
+                time.sleep(0.02)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "goal": self.goal,
             "project": self.project,
+            "status": self.status,
             "order": list(self.order),
             "records": {name: rec.to_dict() for name, rec in self.records.items()},
             "executions": list(self.executions),
@@ -331,6 +364,24 @@ class TaskBoard:
             if stage == after:
                 seen = True
         self.save()
+
+    def set_status(self, status: str) -> None:
+        """Set the run's own status and persist it.
+
+        Kept separate from the stage records on purpose: "the run was cancelled"
+        and "planner finished" are different facts, and a UI polling the board
+        needs both.
+        """
+        self.status = status
+        self.save()
+
+    def cancel(self) -> None:
+        """Mark the run cancelled and every unfinished stage skipped."""
+        for stage in self.order:
+            record = self.get(stage)
+            if record.status in (PENDING, RUNNING):
+                record.status = SKIPPED
+        self.set_status(BOARD_CANCELLED)
 
     # -- summaries ----------------------------------------------------------
     @property

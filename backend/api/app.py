@@ -1,14 +1,16 @@
-"""FastAPI application factory (D17).
+"""FastAPI application factory (D17, D19, D20).
 
-Part A step 1 builds the foundations only: ``/api/health`` and ``/api/events``.
-The app:
+The app owns four things and nothing else: the per-launch token, the SQLite
+event store, the run manager, and the routes. Every behaviour it exposes lives
+in ``backend.core`` (pipeline, sandbox, providers) or in the small services
+beside it; no HTTP handler builds a pipeline, a runtime or a query.
 
-* generates one random token per launch and puts it on ``app.state.security``;
-* opens the SQLite event repository at ``Settings.db_path`` on startup and
-  closes it on shutdown. Step 2 attaches the runtime's event bus to it, so
-  every event the pipeline emits is persisted for replay;
-* exposes routes under a router that depends on :func:`require_token`, so a new
-  route is protected by default.
+* one random token per launch on ``app.state.security``;
+* the event repository at ``Settings.db_path`` (``data/app.db``), opened on
+  startup, with every run's event bus subscribed to it;
+* one :class:`RunManager`, which serialises background runs;
+* routes under a router that depends on :func:`require_token`, so a new route is
+  protected by default.
 
 The bind address is **not** the app's business — :mod:`backend.api.__main__`
 hard-codes ``127.0.0.1`` with no flag to change it. The app additionally
@@ -19,21 +21,36 @@ serve the API to the network.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from backend import __version__
 from backend.api.event_store import EventStore
 from backend.api.middleware import BodySizeLimitMiddleware
-from backend.api.models import EventResponse, EventsPageResponse, HealthResponse
+from backend.api.models import (
+    ApprovalDecisionRequest,
+    ApprovalResponse,
+    CancelResponse,
+    CreateRunRequest,
+    EventResponse,
+    EventsPageResponse,
+    HealthResponse,
+    ProjectSummary,
+    ProjectsListResponse,
+    RunStateResponse,
+    RunsListResponse,
+)
 from backend.api.repository import SqliteEventRepository
-from backend.api.security import ALLOWED_ORIGINS, APP_SCHEME, LaunchSecurity, require_token
+from backend.api.run_manager import GateNotWaiting, RunManager, RunNotFound, RunOptions
+from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
 from backend.core.config import Settings, get_settings, load_env
+from backend.core.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -52,32 +69,50 @@ def get_event_store(request: Request) -> EventStore:
     return request.app.state.event_store
 
 
+def get_run_manager(request: Request) -> RunManager:
+    """FastAPI dependency: the process-wide run manager."""
+    return request.app.state.run_manager
+
+
 def create_app(
     *,
     root: Path | str | None = None,
     security: LaunchSecurity | None = None,
     token: str | None = None,
+    runtime_factory: Callable[[str], Runtime] | None = None,
 ) -> FastAPI:
     """Build the app. Tests pass ``root=tmp_path`` to keep all state in tmp."""
-    settings = Settings.from_root(root) if root is not None else None
+    # State is built *eagerly*, not in the lifespan. A test client that never
+    # enters the lifespan (plain ``TestClient(app)``) must still have a working
+    # manager, and eager construction has no downside: the repository does not
+    # open a connection until the first query, and the manager starts no thread
+    # until a run is created. The lifespan is left with shutdown only.
+    # load_env first so .env wins over the shell (D12).
+    load_env(root)
+    resolved = get_settings(root)
+    event_store = EventStore(SqliteEventRepository(resolved.db_path))
+    # Step 2: one manager for the process. ``runtime_factory`` is the seam tests
+    # use to hand it an offline mock runtime, so no endpoint test can reach a
+    # paid provider.
+    manager = RunManager(
+        settings=resolved,
+        event_store=event_store,
+        runtime_factory=runtime_factory,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # The launcher resolves the real Settings; tests that injected a root
-        # already have one. Either way the db lives at Settings.db_path
-        # (data/app.db) — never beside the code, never in the workspace.
-        # load_env first so .env wins over the shell (D12).
-        load_env(app.state.root)
-        resolved = settings or get_settings(app.state.root)
-        app.state.settings = resolved
-        app.state.event_store = EventStore(SqliteEventRepository(resolved.db_path))
-        # Phase 4 step 2 attaches the runtime's bus here; until then the bus is
-        # created on first run so the event store is ready first.
         logger.info("API ready: db=%s", resolved.db_path)
         try:
             yield
         finally:
-            app.state.event_store.close()
+            # shutdown() cancels every active run, waits for the workers, and
+            # marks the leftovers cancelled so the slot is never left held. It
+            # blocks on worker threads, so it runs in a threadpool rather than
+            # stalling the event loop.
+            await run_in_threadpool(manager.shutdown)
+            event_store.close()
+
 
     app = FastAPI(
         title="Senior Developer Agents API",
@@ -96,6 +131,12 @@ def create_app(
     else:
         app.state.security = LaunchSecurity()
     app.state.root = Path(root) if root is not None else None
+    # A test may inject a factory here; production leaves it None and
+    # RunManager builds real runtimes from config/ and .env.
+    app.state.runtime_factory = runtime_factory
+    app.state.settings = resolved
+    app.state.event_store = event_store
+    app.state.run_manager = manager
 
     # CORS is a browser rule, not authentication: it only tells a *browser*
     # whether to let page JavaScript read the response. The token still guards
@@ -147,6 +188,141 @@ def create_app(
             events=[_event_response(stored) for stored in page],
             last_seq=last_seq,
             has_more=store.last_seq(run_id) > last_seq,
+        )
+
+    # -- runs (Part A, step 2) ----------------------------------------------
+    @api.post("/runs", response_model=RunStateResponse, status_code=202)
+    def create_run(
+        body: CreateRunRequest,
+        manager: RunManager = Depends(get_run_manager),
+    ) -> RunStateResponse:
+        """Accept a pipeline run into the queue (D20).
+
+        ``202 Accepted``, not ``201``: the run is queued behind whichever run holds
+        the single worker, and no agent has answered yet. The body is the queued
+        state, which already carries ``queue_position`` and the event cursor the UI
+        needs, so the UI can render the backlog without a second request.
+        """
+        options = RunOptions.from_request(
+            body, default_stages=manager.default_stages()
+        )
+        record = manager.create(
+            request=body.request, options=options, project=body.project
+        )
+        return manager.detail(record.run_id)
+
+    @api.get("/runs", response_model=RunsListResponse)
+    def list_runs(
+        limit: int = Query(50, ge=1, le=200),
+        manager: RunManager = Depends(get_run_manager),
+    ) -> RunsListResponse:
+        """Runs created by this API process, newest first."""
+        records = manager.list(limit=limit)
+        ids = {record.run_id for record in records}
+        active = manager.active_run_id
+        return RunsListResponse(
+            runs=[record.to_summary() for record in records],
+            total=manager.count(),
+            # Only report an active run the page actually contains: the id of
+            # a run outside the page would read as a broken reference.
+            active_run_id=active if active in ids else None,
+        )
+
+    @api.get("/runs/{run_id}", response_model=RunStateResponse)
+    def get_run(
+        run_id: str,
+        manager: RunManager = Depends(get_run_manager),
+    ) -> RunStateResponse:
+        """The whole run: board, agent outputs, files written, test results."""
+        try:
+            return manager.detail(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @api.post("/runs/{run_id}/cancel", response_model=CancelResponse)
+    def cancel_run(
+        run_id: str,
+        manager: RunManager = Depends(get_run_manager),
+    ) -> CancelResponse:
+        """Request cancellation. A running command's whole tree is killed (D20)."""
+        try:
+            cancelled, note = manager.cancel(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return CancelResponse(
+            run_id=run_id,
+            cancelled=cancelled,
+            status=manager.get(run_id).status,
+            note=note,
+        )
+
+    # -- approval gates (Part A, step 3) -------------------------------------
+    # D17: these two routes re-check the token at the call site, on top of the
+    # router-level dependency, so the requirement is visible right where the
+    # "approve this command" action is implemented.
+    @api.post("/runs/{run_id}/approve", response_model=ApprovalResponse)
+    def approve_run(
+        run_id: str,
+        body: ApprovalDecisionRequest | None = None,
+        manager: RunManager = Depends(get_run_manager),
+        _auth: None = Depends(require_token),
+    ) -> ApprovalResponse:
+        """Approve the gate the run is waiting at; the worker resumes."""
+        note = body.note if body is not None else None
+        try:
+            state = manager.approve(run_id, note)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except GateNotWaiting as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return ApprovalResponse(
+            run_id=run_id,
+            gate=state.gate,
+            decision="approved",
+            status=manager.get(run_id).status,
+            note=state.note,
+        )
+
+    @api.post("/runs/{run_id}/reject", response_model=ApprovalResponse)
+    def reject_run(
+        run_id: str,
+        body: ApprovalDecisionRequest | None = None,
+        manager: RunManager = Depends(get_run_manager),
+        _auth: None = Depends(require_token),
+    ) -> ApprovalResponse:
+        """Reject the gate: the run stops, ending ``failed`` with reason
+        ``rejected`` and this note as its error text."""
+        note = body.note if body is not None else None
+        try:
+            state = manager.reject(run_id, note)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except GateNotWaiting as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return ApprovalResponse(
+            run_id=run_id,
+            gate=state.gate,
+            decision="rejected",
+            status=manager.get(run_id).status,
+            note=state.note,
+        )
+
+    # -- projects ------------------------------------------------------------
+    @api.get("/projects", response_model=ProjectsListResponse)
+    def list_projects(manager: RunManager = Depends(get_run_manager)) -> ProjectsListResponse:
+        """Project folders that exist in the workspace, newest first.
+
+        Only names, file counts and timestamps are returned — never a path
+        outside ``workspace/`` and never file contents (D15).
+        """
+        projects = sorted(
+            manager.workspace_projects(),
+            key=lambda folder: folder.get("created_at") or "",
+            reverse=True,
+        )
+        return ProjectsListResponse(
+            projects=[ProjectSummary(**folder) for folder in projects],
+            total=len(projects),
         )
 
     app.include_router(api)

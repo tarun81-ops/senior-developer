@@ -7,6 +7,7 @@ harmless ``python -c`` commands (which are on the allowlist) as subprocesses.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -256,6 +257,48 @@ def test_runner_refuses_a_disabled_allowlist(tmp_path: Path) -> None:
     runner = CommandRunner(ExecutionConfig(enabled=False))
     with pytest.raises(CommandNotAllowed):
         runner.run('python -c "print(1)"', cwd=tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the tree kill is taskkill (Windows)")
+def test_runner_cancel_kills_the_whole_process_tree(tmp_path: Path) -> None:
+    """A cancel during execution must take grandchildren with it (D15/D20).
+
+    The parent spawns a heartbeat-writing child; the cancel predicate fires the
+    moment that child proves it is alive. After the runner reports the cancel,
+    the heartbeat must have stopped — if it still grows, a grandchild survived
+    ``taskkill /T /F`` and the kill was only skin-deep.
+    """
+    (tmp_path / "child.py").write_text(
+        "import time\n"
+        "for _ in range(150):\n"
+        "    with open('heartbeat.txt', 'a') as fh:\n"
+        "        fh.write('tick\\n')\n"
+        "    time.sleep(0.2)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "parent.py").write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, 'child.py'])\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    marker = tmp_path / "heartbeat.txt"
+    config = ExecutionConfig(
+        allow=["python", "py"],
+        timeout_seconds=60,
+        max_output_bytes=4000,
+        env={"PYTHONIOENCODING": "utf-8"},
+    )
+    runner = CommandRunner(config, cancel_check=lambda: marker.exists())
+
+    result = runner.run("python parent.py", cwd=tmp_path)
+
+    assert result.cancelled is True
+    assert marker.exists(), "the grandchild never started; this proves nothing"
+    # a live grandchild appends every 0.2s: after the kill the file must freeze
+    size_after_kill = marker.stat().st_size
+    time.sleep(1.0)
+    assert marker.stat().st_size == size_after_kill, "a grandchild survived the tree kill"
 
 
 # --------------------------------------------------------------------------- #

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from backend.core.errors import (
     AllProvidersFailed,
@@ -26,11 +26,16 @@ from backend.core.errors import (
     ProviderError,
 )
 from backend.core.events import EventBus
-from backend.core.orchestrator.budgets import BudgetTracker
 from backend.core.provider.client import OpenAICompatClient
 from backend.core.provider.ratelimit import QuotaLedger, backoff_delay, cooldown_seconds
 from backend.core.provider.registry import AgentConfig, Registry, RetryConfig
 from backend.core.provider.schemas import ChatMessage, Completion, ModelSpec, ProviderSpec
+
+# TYPE_CHECKING only: the runtime import would close a cycle
+# orchestrator.budgets -> provider.registry -> provider.router -> budgets.
+# The annotation is lazy (from __future__ import annotations), so this is enough.
+if TYPE_CHECKING:
+    from backend.core.orchestrator.budgets import BudgetTracker
 
 Candidate = tuple[ProviderSpec, ModelSpec]
 

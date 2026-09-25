@@ -16,18 +16,6 @@ class AgentSystemError(Exception):
     """Base class for every error this project raises on purpose."""
 
 
-class RunCancelled(AgentSystemError):
-    """A human cancelled the run (the API's ``POST /runs/{id}/cancel``).
-
-    Not a failure: the board keeps whatever stages already completed, the rest
-    are marked skipped, and the run's status becomes ``cancelled``. The CLI has
-    no way to trigger this; only the API can, which is why the type lives here
-    rather than in ``backend/api``.
-    """
-
-    def __init__(self, message: str = "run cancelled by user") -> None:
-        super().__init__(message)
-
 
 class ConfigError(AgentSystemError):
     """The YAML config or the environment is wrong."""
@@ -161,3 +149,34 @@ class BudgetExceeded(AgentSystemError):
         super().__init__(f"{message} (calls used: {calls}, tokens used: {tokens})")
         self.calls = calls
         self.tokens = tokens
+
+
+class RunCancelled(AgentSystemError):
+    """A human cancelled the run; the pipeline stopped at a safe point (D20).
+
+    Not a failure: the board is left exactly as the pipeline had saved it, with
+    the remaining stages marked skipped, so the UI can show what was done before
+    the stop.
+    """
+
+    def __init__(self, run_id: str = "", stage: str = "") -> None:
+        where = f" during '{stage}'" if stage else ""
+        super().__init__(f"Run {run_id or '-'} was cancelled{where}")
+        self.run_id = run_id
+        self.stage = stage
+
+
+class ApprovalRejected(AgentSystemError):
+    """A human rejected the run at an approval gate (Phase 4, D21).
+
+    Raised by the API's approval hook while ``Pipeline.run`` is blocked waiting
+    at the plan, architecture or execution gate. Not a stage failure: no agent
+    and no command failed, so the pipeline skips the rest and reports
+    ``reason="rejected"`` rather than marking a stage as failed.
+    """
+
+    def __init__(self, gate: str, note: str = "") -> None:
+        detail = f": {note}" if note else ""
+        super().__init__(f"Rejected at the '{gate}' approval gate{detail}")
+        self.gate = gate
+        self.note = note
