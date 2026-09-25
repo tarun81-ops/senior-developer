@@ -1068,6 +1068,58 @@ on Pages, and a project that fits none of the kinds can't deploy yet.
 
 ---
 
+## D37 — What a deploy may publish: the project's own files, scanned, never a key (Phase 5)
+
+**Decision:** `backend/core/deploy/publish.py` (P5.2) decides what leaves the
+machine. It is local only.
+
+* **Scope.** Only files inside the run's own `workspace/<project>/` are
+  considered. Tool and dependency folders are skipped: `.git`,
+  `node_modules`, `.venv`/`venv`, `__pycache__`, caches, `dist`/`build`.
+  Build output is produced by the target (the Pages workflow, Render), never
+  uploaded.
+* **Excluded, with a reason for each:**
+  * secrets by name: `.env`, `.env.*`, `*.env`, `*.pem`, `*.key`,
+    `*.p12`/`*.pfx`, SSH keys, `.npmrc`, `.pypirc`, `.netrc`,
+    `credentials.json`, service-account JSON. `.env.example`, `.sample` and
+    `.template` are allowed, since they are meant to be committed;
+  * caches and OS files;
+  * any single file over 1 MB;
+  * anything whose resolved path is outside the project (symlinks,
+    junctions), which is never read at all.
+* **Scanned, and blocking.** Every published text file is checked for
+  key-shaped strings: Google `AIza…`, OpenAI/OpenRouter `sk-…`, Groq
+  `gsk_…`, GitHub `ghp_…`/`github_pat_…`, Render `rnd_…`, AWS
+  `AKIA…`/`ASIA…`, Slack `xox…`, and PEM private-key blocks. **Any hit
+  blocks the deploy.**
+  * A finding records the file, the line and the kind of key, and never the
+    value, so the preview can show it and logs can hold it.
+  * Binary files are not scanned (key shapes in images are noise).
+* **Other blocks:** no files to publish, or a total over 25 MB.
+* **Tests.** 23 tests, plus one symlink test skipped without symlink rights,
+  cover:
+  * every excluded name;
+  * every key kind, with the value never appearing in the report;
+  * ordinary code that must not trip the scan (environment lookups,
+    placeholder strings, docs naming the variables);
+  * binary and oversized files, empty and missing projects;
+  * a Windows junction pointing outside, whose contents are never published
+    or read. Junctions need no special rights, so they are the real risk.
+
+**Why:** a generated project is model-written, and models happily inline a
+key they saw in context. Publishing is public (static repos are public by
+D36) and effectively permanent, since forks and caches outlive a deleted
+repo. So the check must fail closed and happen before anything leaves the
+machine. It never prints what it found, so the check itself can't leak the
+key.
+
+**Cost accepted:** a key the patterns don't know gets through. The scan is
+a safety net, not a guarantee, and the human confirmation (P5.5/P5.6) still
+shows every file. A test fixture that really needs a key-shaped string will
+block a deploy until it is moved into `.env.example`-style placeholders.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
