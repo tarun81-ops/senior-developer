@@ -119,7 +119,6 @@ def test_oversized_body_is_refused(client: TestClient) -> None:
     throwaway app that mounts it the same way the real router does; the first
     real POST endpoint (step 2) inherits the same check.
     """
-    from fastapi import Depends, FastAPI
 
     probe = FastAPI()
     probe.state.security = LaunchSecurity(token="t")
@@ -382,7 +381,6 @@ def test_two_buses_keep_independent_sequences(tmp_path: Path) -> None:
 
 
 def test_wait_for_returns_as_soon_as_an_event_arrives(tmp_path: Path) -> None:
-    import threading
 
     from backend.api.event_store import EventStore
 

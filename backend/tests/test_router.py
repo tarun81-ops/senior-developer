@@ -14,9 +14,9 @@ from backend.core.events import EventBus, JsonlWriter
 from backend.core.provider.schemas import ChatMessage
 from backend.tests.helpers import (
     MISSING_KEY_ENV,
+    budget_for,
     build_registry,
     build_router,
-    budget_for,
     event_kinds,
     keyed_provider,
     mock_provider,

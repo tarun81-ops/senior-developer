@@ -28,12 +28,12 @@ Cancellation is cooperative plus forceful:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import UTC
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -808,13 +808,13 @@ def _agent_overrides(
 
 def _iso_from_mtime(folder: Path) -> str:
     """Folder creation time in the same shape :func:`utc_now` returns."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
         stamp = folder.stat().st_mtime
     except OSError:  # pragma: no cover - folder vanished mid-listing
         stamp = time.time()
-    return datetime.fromtimestamp(stamp, timezone.utc).isoformat(timespec="seconds")
+    return datetime.fromtimestamp(stamp, UTC).isoformat(timespec="seconds")
 
 
 def _parse_ts(value: Any) -> str:

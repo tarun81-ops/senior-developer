@@ -8,7 +8,7 @@ explicitly rather than relying on defaults.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -40,7 +40,7 @@ MAX_FILES_IN_RESPONSE = 500
 
 def utc_now() -> str:
     """UTC timestamp in the same shape the event bus uses."""
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 class HealthResponse(BaseModel):

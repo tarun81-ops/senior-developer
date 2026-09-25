@@ -20,7 +20,6 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 from backend import __version__
@@ -116,7 +115,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     print(f"senior-developer-agents v{__version__}  (doctor)\n")
     print(_ok(f"Python {sys.version.split()[0]} ({sys.executable})"))
-    if sys.version_info < (3, 11):
+    if sys.version_info < (3, 11):  # noqa: UP036 - doctor reports it, not the import
         print(_fail("Python 3.11 or newer is required"))
         problems += 1
     elif sys.version_info >= (3, 14):
@@ -224,7 +223,10 @@ def cmd_providers(args: argparse.Namespace) -> int:
         rows = []
         for row in runtime.registry.provider_status():
             key_source = "(offline)" if not row["requires_key"] else row["api_key_env"]
-            key_state = "set" if row["key_present"] else ("-" if not row["requires_key"] else "missing")
+            if row["key_present"]:
+                key_state = "set"
+            else:
+                key_state = "missing" if row["requires_key"] else "-"
             rows.append(
                 [
                     row["provider"],
@@ -298,7 +300,8 @@ def cmd_models(args: argparse.Namespace) -> int:
                 continue
             for model_id, model_spec in sorted(spec.models.items()):
                 roles = ", ".join(model_spec.good_at) or "-"
-                print(f"  {model_id:<48} max_out={model_spec.max_output_tokens:<6} good at: {roles}")
+                max_out = model_spec.max_output_tokens
+                print(f"  {model_id:<48} max_out={max_out:<6} good at: {roles}")
         print("\nTip: add --live to ask the provider itself (needs a key).")
     finally:
         runtime.close()
@@ -563,7 +566,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
                     f"provider   : {completion.provider}",
                     f"model      : {completion.model}",
                     f"tokens     : {completion.usage.total_tokens}"
-                    f" (in {completion.usage.prompt_tokens} / out {completion.usage.completion_tokens})",
+                    f" (in {completion.usage.prompt_tokens}"
+                    f" / out {completion.usage.completion_tokens})",
                     f"latency    : {completion.latency_ms} ms (wall clock {elapsed_ms} ms)",
                     f"attempts   : {' | '.join(completion.attempts) or '-'}",
                     f"failover   : {'yes' if completion.failed_over else 'no'}",

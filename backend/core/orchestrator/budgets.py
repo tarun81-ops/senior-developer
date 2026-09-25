@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,7 @@ class RunState:
     tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -95,7 +95,7 @@ class BudgetTracker:
     def _flush(self) -> None:
         if self.path is None:
             return
-        self.state.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.state.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.state.to_dict(), indent=2), encoding="utf-8")

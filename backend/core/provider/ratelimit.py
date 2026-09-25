@@ -25,7 +25,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,11 +44,11 @@ MINUTE_WINDOW = 60.0
 
 def pacific_day(moment: datetime | None = None) -> str:
     """Return the current ``YYYY-MM-DD`` in the Pacific timezone."""
-    moment = moment or datetime.now(timezone.utc)
+    moment = moment or datetime.now(UTC)
     if ZoneInfo is None:  # pragma: no cover - extremely defensive
-        return moment.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        return moment.astimezone(UTC).strftime("%Y-%m-%d")
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(ZoneInfo(PACIFIC_TZ)).strftime("%Y-%m-%d")
 
 
@@ -145,7 +145,7 @@ class QuotaLedger:
         if not self.save_enabled:
             return
         payload = {
-            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "providers": {k: v.to_dict() for k, v in self._usage.items()},
             "cooldowns": self._cooldowns,
         }

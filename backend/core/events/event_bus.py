@@ -24,9 +24,10 @@ Event kinds used in Phase 1:
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from backend.core.events.jsonl_log import JsonlWriter
 
@@ -34,7 +35,7 @@ EventSink = Callable[["Event"], None]
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 @dataclass

@@ -145,7 +145,8 @@ def test_changes_requested_runs_fix_loop_then_stops_for_a_human(tmp_path: Path) 
     assert board.records["docs"].status == SKIPPED
     assert board.ok is False
 
-    kinds = [json.loads(line)["kind"] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    lines = (tmp_path / "events.jsonl").read_text().splitlines()
+    kinds = [json.loads(line)["kind"] for line in lines]
     assert "pipeline.fix" in kinds
     assert "pipeline.unresolved_review" in kinds
 
@@ -215,7 +216,9 @@ class StubAgent:
         self.messages: list[str] = []
         self.contexts: list[dict] = []
 
-    def run(self, message, *, context=None, temperature=None, max_output_tokens=None, override=None):
+    def run(
+        self, message, *, context=None, temperature=None, max_output_tokens=None, override=None
+    ):
         self.messages.append(message)
         self.contexts.append(dict(context or {}))
         text = self.replies[min(len(self.messages) - 1, len(self.replies) - 1)]

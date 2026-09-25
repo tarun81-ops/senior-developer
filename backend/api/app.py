@@ -41,15 +41,15 @@ from backend.api.models import (
     EventResponse,
     EventsPageResponse,
     HealthResponse,
-    ProjectSummary,
     ProjectsListResponse,
-    RunStateResponse,
+    ProjectSummary,
     RunsListResponse,
+    RunStateResponse,
 )
 from backend.api.repository import SqliteEventRepository
 from backend.api.run_manager import GateNotWaiting, RunManager, RunNotFound, RunOptions
 from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
-from backend.core.config import Settings, get_settings, load_env
+from backend.core.config import get_settings, load_env
 from backend.core.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -237,7 +237,7 @@ def create_app(
         try:
             return manager.detail(run_id)
         except RunNotFound as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @api.post("/runs/{run_id}/cancel", response_model=CancelResponse)
     def cancel_run(
@@ -248,7 +248,7 @@ def create_app(
         try:
             cancelled, note = manager.cancel(run_id)
         except RunNotFound as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         return CancelResponse(
             run_id=run_id,
             cancelled=cancelled,
@@ -272,9 +272,9 @@ def create_app(
         try:
             state = manager.approve(run_id, note)
         except RunNotFound as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except GateNotWaiting as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return ApprovalResponse(
             run_id=run_id,
             gate=state.gate,
@@ -296,9 +296,9 @@ def create_app(
         try:
             state = manager.reject(run_id, note)
         except RunNotFound as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except GateNotWaiting as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return ApprovalResponse(
             run_id=run_id,
             gate=state.gate,

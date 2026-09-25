@@ -44,7 +44,7 @@ ALLOWED_ORIGINS: tuple[str, ...] = (
 #: as a *standard, secure* scheme and serves the built UI from ``sda://app/…``,
 #: which produces a real, checkable origin. ``null`` stays denied.
 APP_SCHEME = "sda"
-APP_SCHEME_ORIGIN = re.compile(rf"^sda://[a-z0-9.-]+(?::\d+)?$", re.IGNORECASE)
+APP_SCHEME_ORIGIN = re.compile(r"^sda://[a-z0-9.-]+(?::\d+)?$", re.IGNORECASE)
 
 #: Host header values we answer to. The port is whatever uvicorn is told to use,
 #: so it is checked separately from the host name.
@@ -163,7 +163,7 @@ class LaunchSecurity:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid Content-Length header",
-            )
+            ) from None
         if length < 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any
 
 import httpx
@@ -221,9 +222,9 @@ class OpenAICompatClient:
 
             when = parsedate_to_datetime(raw)
             if when is not None:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
-                delta = when - datetime.now(timezone.utc)
+                delta = when - datetime.now(UTC)
                 return max(0.0, delta.total_seconds())
         except (TypeError, ValueError):
             return None

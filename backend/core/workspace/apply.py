@@ -15,8 +15,9 @@ draft from the coder) and the conflict is recorded in the report, never silent.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from backend.core.orchestrator.board import DONE, TaskBoard
 from backend.core.workspace.sandbox import UnsafePath, Workspace, safe_relative_path
@@ -96,7 +97,11 @@ class ApplyReport:
         counts = self.counts()
         if not counts["total"]:
             return "no files were produced by the stages"
-        parts = [f"{counts['written']} new", f"{counts['overwritten']} updated", f"{counts['unchanged']} unchanged"]
+        parts = [
+            f"{counts['written']} new",
+            f"{counts['overwritten']} updated",
+            f"{counts['unchanged']} unchanged",
+        ]
         if counts["rejected"]:
             parts.append(f"{counts['rejected']} REJECTED")
         prefix = "dry run: " if self.dry_run else ""

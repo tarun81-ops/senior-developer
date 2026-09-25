@@ -7,7 +7,7 @@ free-tier quota: get it wrong and runs die halfway through with 429s.
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -59,7 +59,7 @@ def test_jitter_stays_within_50_percent() -> None:
     ],
 )
 def test_pacific_day_boundary(utc_hour: int, utc_minute: int, expected_day: str) -> None:
-    moment = datetime(2026, 9, 24, utc_hour, utc_minute, tzinfo=timezone.utc)
+    moment = datetime(2026, 9, 24, utc_hour, utc_minute, tzinfo=UTC)
     assert pacific_day(moment) == expected_day
 
 
