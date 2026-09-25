@@ -1120,6 +1120,66 @@ block a deploy until it is moved into `.env.example`-style placeholders.
 
 ---
 
+## D38 — GitHub client: stable repo, full snapshots, Pages by workflow, never someone else's repo (Phase 5)
+
+**Decision:** `backend/core/deploy/github.py` (P5.3) talks to GitHub's REST
+API over `httpx`, so git does not need to be installed.
+
+* **Repo.**
+  * `sda-<folder>` is created on the first deploy, public for static sites
+    (D36), with `auto_init`, so there is a default branch to build on. Its
+    description carries a marker, "Deployed by Senior Developer Agents".
+  * An existing repo is used **only if it carries that marker**. A repo of
+    yours that happens to share the name is refused, with nothing written.
+  * A marked repo whose visibility no longer fits the kind is refused, not
+    silently flipped.
+* **Snapshot.**
+  * Every published file becomes a blob, then one **full** tree with no
+    `base_tree`, so a file deleted from the project disappears from the repo
+    too.
+  * Then one commit, and a **fast-forward** of the default branch (never a
+    force push).
+  * If the tree equals the current one, there is **no commit and no build**,
+    so a repeated deploy is a no-op.
+* **Pages.**
+  * Pages is enabled with `build_type: workflow` **before** the push, so the
+    push's own workflow run can deploy. A repo left on branch builds is
+    switched to the workflow.
+  * The workflow file `.github/workflows/sda-pages.yml` is written by the app
+    on every deploy. A project file at that path can't replace it.
+  * It uses `actions/checkout@v7`, `setup-node@v7` (Node `lts/*`, Vite only),
+    `configure-pages@v6`, `upload-pages-artifact@v5` and `deploy-pages@v5`.
+    Those are the current majors, checked against GitHub's releases on
+    2026-09-26 rather than taken from memory.
+  * The deploy waits for that commit's workflow run. A failed build is
+    reported with its conclusion and log URL.
+* **API.** API version `2022-11-28` is pinned. GitHub also offers
+  `2026-03-10`; moving needs a read of its changes first.
+* **Token.**
+  * It is sent only in the `Authorization` header.
+  * Errors are explained without it: rejected token, rate limit with its
+    reset time, missing permission (naming the ones needed), network down.
+  * A fine-grained token needs Administration, Contents, Pages and Workflows
+    (read and write) plus Actions (read) on the account's repositories.
+    Pushing a workflow file requires the Workflows permission.
+* **Tests.**
+  * 18 tests against an in-memory fake GitHub with real git-like state
+    (blobs, trees, commits, fast-forward-only refs, Pages, workflow runs
+    that progress when polled).
+  * Mutation-checked: disabling the ownership check, the unchanged-tree
+    check, or the Pages-before-push order each fails a test.
+
+**Why:** a deploy writes to the user's GitHub account, so it must be exactly
+reproducible (full snapshot), safe to repeat (no-op when unchanged), and
+unable to damage anything it did not create (marker, no force push, no
+visibility flips).
+
+**Cost accepted:** one blob request per file (fine for generated projects,
+slow for thousands of files). The repo's history grows with each changed
+deploy, and pages built by the workflow take about a minute after the push.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
