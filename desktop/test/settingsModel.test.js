@@ -68,3 +68,12 @@ test("only typed keys are sent, trimmed", () => {
     GEMINI_API_KEY: "AIza-x",
   });
 });
+
+test("deploy keys are grouped apart from model provider keys (D41)", async () => {
+  const { keyGroups } = await import("../src/settingsModel.js");
+  const names = ["GEMINI_API_KEY", "GITHUB_TOKEN", "GROQ_API_KEY", "RENDER_API_KEY", "RENDER_OWNER_ID"];
+  assert.deepEqual(keyGroups(names), [
+    ["GEMINI_API_KEY", "GROQ_API_KEY"],
+    ["GITHUB_TOKEN", "RENDER_API_KEY", "RENDER_OWNER_ID"],
+  ]);
+});

@@ -41,6 +41,9 @@ ALL_GATES = ["plan", "architecture", "execution"]
 FAKE_KEYS = {
     "GEMINI_API_KEY": "AIza-e2e-gemini-secret-0123456789",
     "GROQ_API_KEY": "gsk_e2e-groq-secret-0123456789",
+    # deploy credentials must never come back either (D41)
+    "GITHUB_TOKEN": "github_pat_e2e_" + "g" * 30,
+    "RENDER_API_KEY": "rnd_e2e" + "r" * 24,
 }
 
 #: The whole API surface (Part A, the B4 file routes, the P5.5 deploy routes). A new route fails
@@ -72,7 +75,8 @@ SURFACE = {
 def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A throwaway project root with the tracked config and no real keys."""
     shutil.copytree(PACKAGE_ROOT / "config", tmp_path / "config")
-    for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"):
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+                 "GITHUB_TOKEN", "RENDER_API_KEY", "RENDER_OWNER_ID"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setitem(sys.modules, "keyring", None)
     return tmp_path
@@ -346,9 +350,16 @@ def test_no_response_ever_contains_a_key_value(
 
     put = http.put("/api/settings/keys", json={"keys": FAKE_KEYS})
     assert put.status_code == 200
-    assert put.json()["keys"] == dict.fromkeys(
-        ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"), "set"
-    )
+    assert put.json()["keys"] == {
+        **dict.fromkeys(
+            (
+                "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+                "GITHUB_TOKEN", "RENDER_API_KEY",
+            ),
+            "set",
+        ),
+        "RENDER_OWNER_ID": "missing",
+    }
     bodies.append(put.text)
     bad_value = {"GEMINI_API_KEY": FAKE_KEYS["GEMINI_API_KEY"] + " x"}
     bad = http.put("/api/settings/keys", json={"keys": bad_value})
@@ -369,3 +380,27 @@ def test_no_response_ever_contains_a_key_value(
             assert secret not in body
     # the key did land where it belongs
     assert FAKE_KEYS["GEMINI_API_KEY"] in (root / ".env").read_text(encoding="utf-8")
+
+
+def test_deploys_use_real_targets_unless_the_dev_switch_is_set(
+    fake_launch: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SDA_FAKE_DEPLOY", raising=False)
+    assert launcher.main(["--port", "0"]) == 0
+    assert fake_launch["deploy_clients"] is None  # the real GitHub/Render clients
+
+    from backend.tests import fake_targets
+
+    monkeypatch.setenv("SDA_FAKE_DEPLOY", "1")
+    assert launcher.main(["--port", "0"]) == 0
+    assert fake_launch["deploy_clients"] is fake_targets.clients
+
+
+def test_the_dev_switch_refuses_to_start_without_the_fakes(
+    fake_launch: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed app has no backend/tests: the switch must not fall back to real targets."""
+    monkeypatch.setenv("SDA_FAKE_DEPLOY", "1")
+    monkeypatch.setitem(sys.modules, "backend.tests.fake_targets", None)  # import fails
+    assert launcher.main(["--port", "0"]) == 2
+    assert not fake_launch  # no app was built

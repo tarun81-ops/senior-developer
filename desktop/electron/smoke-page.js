@@ -241,6 +241,12 @@
       const keyInput = $('input[name="key-GEMINI_API_KEY"]');
       step("key fields are password fields", keyInput.type === "password");
       type(keyInput, FAKE_KEY);
+      // a deploy credential (D41): its own group, the same write-only rule
+      const FAKE_GH = "github_pat_smoke_" + "x".repeat(30);
+      const ghInput = $('input[name="key-GITHUB_TOKEN"]');
+      step("deploy keys have their own group",
+        Boolean(ghInput) && [...document.querySelectorAll('form[aria-label="API keys"] h3')].some((h) => /Deploying/.test(h.textContent)));
+      type(ghInput, FAKE_GH);
       const keysForm = () => $('form[aria-label="API keys"]');
       const keySaves = Number(keysForm().dataset.saves);
       [...keysForm().querySelectorAll("button")].find((b) => b.textContent === "Save keys").click();
@@ -250,6 +256,10 @@
       step("the key is gone from the page",
         !document.body.innerText.includes(FAKE_KEY)
         && [...document.querySelectorAll("input")].every((i) => i.value !== FAKE_KEY));
+      step("the GitHub token is saved as set and gone from the page",
+        $('[data-key="GITHUB_TOKEN"] .key-status').textContent === "set"
+        && !document.body.innerText.includes(FAKE_GH)
+        && [...document.querySelectorAll("input")].every((i) => i.value !== FAKE_GH));
 
       // -- B6: run history, cancel from the dialog, window title ---------------------
       nav("Runs").click();
@@ -282,6 +292,42 @@
       step("the title is back to normal", document.title === "Senior Developer Agents", document.title);
       await until(() => $(".run-item")?.querySelector(".status-pill")?.dataset.status === "cancelled", "the list to update");
       step("the list shows the new run's final status", $(".run-item").querySelector(".status-pill").dataset.status === "cancelled");
+
+      // -- Phase 5 (P5.6): deploy, against in-memory fakes (SDA_FAKE_DEPLOY) --------
+      // a run that failed is not deployable, and the tab says why
+      [...document.querySelectorAll(".run-item")].find((b) => b.querySelector(".status-pill").dataset.status === "failed").click();
+      await until(() => pill() === "failed", "the failed run to open");
+      tab("Deploy").click();
+      const blockers = await until(() => $('[data-field="blockers"]'), "the deploy blockers");
+      step("a failed run shows why it can't deploy, with no deploy button",
+        /only runs that succeeded/.test(blockers.textContent) && !button("Review and deploy…"), blockers.textContent);
+
+      // a run whose tests run and pass: the execution gate (on by default) is approved
+      setChecked($(".dev-menu input"), true);
+      type($("textarea[name=request]"), "smoke: deploy me");
+      type($("input[name=project]"), "smoke-site");
+      step("execution gate on for the deploy run", checkbox("gate-execution").checked);
+      button("Start run").click();
+      d = await waitDialog("command");
+      [...d.querySelectorAll("button")].find((b) => b.textContent.trim() === "Approve and run").click();
+      await until(() => ["succeeded", "failed"].includes(pill()), "the deploy run to finish", 60000);
+      step("the site's run succeeded with its tests", pill() === "succeeded", $(".run .error")?.textContent);
+
+      tab("Deploy").click();
+      const review = await until(() => button("Review and deploy…"), "the deploy button");
+      step("the Deploy tab names the target", /GitHub Pages/.test($(".deploy").textContent) && /public/.test($(".deploy").textContent));
+      review.click();
+      const dd = await until(() => $("dialog.deploy-dialog[open]"), "the deploy dialog");
+      const files = [...dd.querySelectorAll('[data-field="files"] code')].map((c) => c.textContent);
+      step("the dialog lists every file to publish", files.includes("index.html") && files.includes("tests/test_ok.py"), files);
+      step("the dialog warns that it is public", /PUBLIC/.test(dd.querySelector('[data-field="visibility-warning"]').textContent));
+      step("Cancel has focus, not Publish", document.activeElement?.textContent === "Cancel");
+      [...dd.querySelectorAll("button")].find((b) => b.textContent === "Publish to GitHub Pages").click();
+      const urlField = await until(() => $('[data-field="deploy-url"]') || $('[data-field="deploy-error"]'), "the deploy to finish", 60000);
+      step("the deploy succeeds and shows its URL", urlField.value === "https://octo.github.io/sda-smoke-site/", urlField.value ?? urlField.textContent);
+      step("the URL is text to copy, never a link", !$(".deploy").querySelector("a, [href]"));
+      await until(() => $('.deploy-history li[data-status="succeeded"]'), "the deploy history");
+      step("the deploy is in the history", Boolean($('.deploy-history li[data-status="succeeded"] code')));
     }
   } catch (err) {
     report.error = err.message;

@@ -6,10 +6,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { CLOSING_KINDS } from "./api.js";
 import ApprovalDialog from "./ApprovalDialog.jsx";
+import DeployView from "./DeployView.jsx";
 import FilesView from "./FilesView.jsx";
 import TaskBoard from "./TaskBoard.jsx";
 
-const TABS = [["timeline", "Timeline"], ["board", "Task board"], ["files", "Files"]];
+const TABS = [["timeline", "Timeline"], ["board", "Task board"], ["files", "Files"], ["deploy", "Deploy"]];
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -113,6 +114,7 @@ export default function RunView({ client, runId }) {
       {tab === "timeline" && <EventLog events={events} />}
       {tab === "board" && run && <TaskBoard run={run} />}
       {tab === "files" && <FilesView client={client} runId={runId} refreshKey={run?.status} />}
+      {tab === "deploy" && <DeployView client={client} runId={runId} refreshKey={run?.status} />}
     </section>
   );
 }

@@ -2,8 +2,11 @@
 // fetch() because EventSource cannot send X-API-Key (D19). Plain ES module with
 // an injectable fetch, so Node's test runner exercises it unchanged.
 
-/** Kinds of the one closing event every run gets (backend/api/stream.py). */
-export const CLOSING_KINDS = new Set(["api.run_succeeded", "api.run_failed", "api.run_cancelled"]);
+/** Kinds of the one closing event every run, and every deploy, gets (backend/api/stream.py). */
+export const CLOSING_KINDS = new Set([
+  "api.run_succeeded", "api.run_failed", "api.run_cancelled",
+  "deploy.succeeded", "deploy.failed",
+]);
 
 export class ApiError extends Error {
   constructor(status, detail) {
@@ -129,6 +132,9 @@ export function createClient({ baseUrl, token, fetch: fetchImpl = globalThis.fet
     cancel: (id) => request("POST", `/api/runs/${encodeURIComponent(id)}/cancel`),
     approve: (id, note) => request("POST", `/api/runs/${encodeURIComponent(id)}/approve`, { note }),
     reject: (id, note) => request("POST", `/api/runs/${encodeURIComponent(id)}/reject`, { note }),
+    deployPreview: (id) => request("GET", `/api/runs/${encodeURIComponent(id)}/deploy/preview`),
+    deploy: (id, fingerprint) => request("POST", `/api/runs/${encodeURIComponent(id)}/deploy`, { fingerprint }),
+    listDeploys: (id) => request("GET", `/api/runs/${encodeURIComponent(id)}/deploys`),
     getSettings: () => request("GET", "/api/settings"),
     saveSettings: (body) => request("PUT", "/api/settings", body),
     saveKeys: (keys) => request("PUT", "/api/settings/keys", { keys }),

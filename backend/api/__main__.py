@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import socket
 import sys
@@ -79,7 +80,18 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     else:
         token = new_api_token()
-    app = create_app(root=args.root, token=token)
+    deploy_clients = None
+    if os.environ.get("SDA_FAKE_DEPLOY") == "1":
+        # Development smoke only (D41): deploys go to in-memory fakes. The
+        # fakes live in backend/tests, which the installer does not ship, so an
+        # installed app cannot be switched over; it refuses to start instead.
+        try:
+            from backend.tests.fake_targets import clients as deploy_clients
+        except ImportError:
+            print("error: SDA_FAKE_DEPLOY is only for a development checkout", file=sys.stderr)
+            return 2
+        print("warning: SDA_FAKE_DEPLOY=1, deploys go to in-memory fakes", file=sys.stderr)
+    app = create_app(root=args.root, token=token, deploy_clients=deploy_clients)
 
     # Bind *and listen* before announcing the port: a client that connects the
     # moment it reads the line waits in the backlog instead of being refused.

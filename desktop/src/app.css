@@ -97,3 +97,10 @@ table.agents select { font: inherit; max-width: 320px; }
 .run-item-meta { display: flex; gap: 8px; align-items: center; font-size: 12px; }
 .actions .spacer { flex: 1; }
 button.cancel-run { color: #b3261e; }
+.deploy .notice ul { margin: 4px 0 0; }
+.deploy-events { font-size: 13px; }
+.deploy-history { list-style: none; padding: 0; font-size: 13px; }
+.deploy-history li { margin: 4px 0; overflow-wrap: anywhere; }
+.publish-files { max-height: 30vh; overflow: auto; font-size: 13px; }
+.copy-url input { font-family: ui-monospace, monospace; padding: 4px; }
+.key-help { grid-column: 1 / -1; font-size: 12px; margin-top: -2px; }

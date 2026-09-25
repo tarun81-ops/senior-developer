@@ -1313,6 +1313,69 @@ shows a placeholder until the deploy reports the real URL.
 
 ---
 
+## D41 — Deploy UI and keys; the dev smoke deploys to fakes that can't ship (Phase 5)
+
+**Decision:**
+
+* **Deploy tab** (P5.6). Each run has a Deploy tab built from the preview
+  (D40):
+  * it shows the target and why it was chosen;
+  * if the run can't be deployed, it lists every blocker in plain words and
+    **offers no Deploy button**;
+  * if it can, **Review and deploy…** opens a modal `<dialog>` with:
+    * a visibility warning, spelling out what becomes public (a public
+      repo and site; or a private repo whose running service is public);
+    * the repo, the address, and the exact build and start commands,
+      verbatim;
+    * every file to publish, and the excluded ones with their reasons;
+    * **Cancel first**, so Enter can't publish by accident;
+    * the same queued-close-event guard as the approval dialog (D31).
+* **Confirming.** Confirm sends the preview's fingerprint. A `409` "changed
+  since the preview" reloads the preview.
+* **Progress and history.** The deploy's own stream is followed with the
+  same fetch client; `deploy.succeeded`/`deploy.failed` joined the client's
+  closing kinds. The address appears as a read-only field with a **Copy**
+  button that copies selected text on a click. It is never a link: the page
+  can't open URLs (D26), and no clipboard permission is granted. Deploy
+  history is listed under it.
+* **Keys.** `GITHUB_TOKEN`, `RENDER_API_KEY` and `RENDER_OWNER_ID` joined
+  the write-only keys API (D22): accepted by `PUT /api/settings/keys`,
+  written to `.env`, reported only as set or missing. Settings shows them
+  as a separate **Deploying** group, with what each is for. The end-to-end
+  key test now also proves deploy tokens never appear in any response.
+* **Dev smoke without the network.** `SDA_FAKE_DEPLOY=1` makes
+  `python -m backend.api` use the in-memory fake GitHub and Render from
+  `backend/tests/fake_targets.py`. The keys are still required, so the
+  "set your keys" path is real.
+  * Only the development smoke sets it.
+  * The fakes live in `backend/tests`, which the installer does not ship.
+    The bundle script now **fails the build if `backend/tests` is present**,
+    and the launcher **refuses to start** (exit 2) if the switch is set but
+    the fakes can't be imported. So an installed app can never be pointed
+    at fakes, and never quietly falls back to the real services either.
+* **Smoke.** The development smoke (70 steps) now also:
+  * saves a fake GitHub token through Settings (write-only, never in the
+    page);
+  * shows a failed run's blockers with no button;
+  * runs a static site on the mock, approving its execution gate, so it
+    succeeds with tests passed;
+  * reviews the dialog: every file listed, the public warning, focus on
+    Cancel;
+  * publishes to the fakes, gets the Pages address as copyable text with
+    no link anywhere in the tab, and sees it in the history.
+
+  It passed 3 of 3.
+
+**Why:** the deploy is the most consequential button in the app. It must
+show exactly what it will do, default to not doing it, and be exercised end
+to end in the real UI without ever touching a real account.
+
+**Cost accepted:** the installed-app smoke does not deploy, because it has
+no fakes by design and no account to use. The first real deploy (P5.7) is
+the proof against the real services.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |

@@ -103,6 +103,10 @@ function copyBackend() {
 
 /** The bundle must run the backend and a generated project's tests. */
 async function verify() {
+  // The dev-only fake deploy targets live in backend/tests (D41): they must not ship.
+  if (fs.existsSync(path.join(BACKEND_ROOT, "backend", "tests"))) {
+    throw new Error("backend/tests is in the bundle; the dev-only fake deploy targets must not ship");
+  }
   // every module must come from the bundle itself, never from a user site
   run(PY_EXE, ["-c", [
     "import sys, site, fastapi, uvicorn, httpx, pydantic, yaml, dotenv, tzdata, pytest",

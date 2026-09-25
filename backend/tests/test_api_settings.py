@@ -20,7 +20,11 @@ from backend.core.local_settings import LocalOverrides
 from backend.core.provider.registry import Registry
 
 TOKEN = "test-token-not-secret"
-KEY_VARS = ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY")
+KEY_VARS = (
+    "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+    # deploy credentials (D41)
+    "GITHUB_TOKEN", "RENDER_API_KEY", "RENDER_OWNER_ID",
+)
 FAKE_KEY = "AIza-fake-test-key-0123456789"
 
 
@@ -134,7 +138,8 @@ def test_keys_are_write_only(client: TestClient, root: Path) -> None:
     response = client.put("/api/settings/keys", json={"keys": {"GEMINI_API_KEY": FAKE_KEY}})
     assert response.status_code == 200, response.text
     assert response.json()["keys"] == {
-        "GEMINI_API_KEY": "set", "GROQ_API_KEY": "missing", "OPENROUTER_API_KEY": "missing"
+        "GEMINI_API_KEY": "set", "GROQ_API_KEY": "missing", "OPENROUTER_API_KEY": "missing",
+        "GITHUB_TOKEN": "missing", "RENDER_API_KEY": "missing", "RENDER_OWNER_ID": "missing",
     }
     assert FAKE_KEY not in response.text
     for path in ("/api/settings", "/api/health"):

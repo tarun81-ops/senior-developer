@@ -135,6 +135,13 @@ function smokeRoot() {
   // Empty apart from the fixtures below: config and prompts come from the app
   // itself, exactly as for an installed app's data root (D33).
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sda-smoke-"));
+  // A tiny static site with a passing test: a mock run on it succeeds with
+  // its tests passed, so it is deployable (D35); the dev smoke deploys it to
+  // the in-memory fakes (SDA_FAKE_DEPLOY, D41).
+  const site = path.join(root, "workspace", "smoke-site");
+  fs.mkdirSync(path.join(site, "tests"), { recursive: true });
+  fs.writeFileSync(path.join(site, "index.html"), "<h1>smoke site</h1>\n");
+  fs.writeFileSync(path.join(site, "tests", "test_ok.py"), "def test_ok():\n    pass\n");
   // A project that already has tests/, so the pipeline detects a test command
   // and the smoke reaches a real execution gate on the offline mock model.
   // The development smoke rejects that gate; the installed one approves it,
@@ -198,6 +205,9 @@ app.whenReady().then(async () => {
   if (!DEV_URL) Menu.setApplicationMenu(null); // no DevTools/reload menu in the real app
   lockDownSession();
   try {
+    // The dev smoke deploys to in-memory fakes, never to GitHub or Render.
+    // An installed app can't honour this: the fakes aren't shipped (D41).
+    if (SMOKE && !app.isPackaged) process.env.SDA_FAKE_DEPLOY = "1";
     backend = await startBackend({ root: dataRoot(), ...backendLaunch() });
   } catch (err) {
     console.error(String(err.message || err));

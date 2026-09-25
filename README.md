@@ -322,6 +322,33 @@ What B5 gives you: a **Settings** screen, next to **Runs** in the header.
   names the file and the reason. Saving replaces the file and clears the
   warning.
 
+Deploying a finished run (Phase 5, D35–D41):
+
+- **Deploy tab.** Every run has a **Deploy** tab showing where it would go:
+  - a static site (plain `index.html` or a Vite app) goes to **GitHub
+    Pages**, from a public repo;
+  - a Python FastAPI/Flask backend goes to **Render**, from a private repo.
+
+  If the run can't be deployed, the tab says why in plain words instead of
+  showing a button: it didn't succeed with its tests passing, the project
+  type isn't supported yet, a likely secret is in the files, or a key isn't
+  set.
+- **Review, then publish.** **Review and deploy…** opens a dialog listing
+  every file that will be published, what's excluded and why, the exact
+  build and start commands, and a plain warning about what becomes public.
+  **Cancel** has focus by default. The server publishes only exactly what
+  the dialog showed: if the project changes in between, it refuses and asks
+  you to review again.
+- **Live progress and history.** Progress streams live. The site's address
+  appears as text with a **Copy** button (the app never opens links), and
+  earlier deploys are listed with their outcome.
+- **Keys.** Settings → API keys has a **Deploying** group: `GITHUB_TOKEN`
+  (a fine-grained token with Administration, Contents, Pages and Workflows
+  read/write and Actions read), `RENDER_API_KEY`, and `RENDER_OWNER_ID`
+  (only if your Render key can reach several workspaces). They are
+  write-only, like the model keys. Render also needs its GitHub app
+  installed on your account with access to all repositories.
+
 What B6 gives you:
 
 - **Run history.** A **Runs** list under the New run form shows every run,
@@ -436,7 +463,7 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                275 tests, no network, no keys required
+  tests/                382 tests, no network, no keys required
 desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
   electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
@@ -457,7 +484,7 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   scripts/bundle-backend.mjs   npm run bundle: pinned CPython + deps + backend, verified
   scripts/smoke-installed.mjs  npm run smoke:installed: install, self-check, uninstall
 requirements-app.txt    what the installer's bundled Python gets (runtime + pytest)
-docs/DECISIONS.md       why each decision was made (D1–D34)
+docs/DECISIONS.md       why each decision was made (D1–D41)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -468,14 +495,15 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 275 tests (1 skipped without symlink rights), ~50s
+.\.venv\Scripts\python -m pytest          # 382 tests (2 skipped without symlink rights), ~90s
 ```
 
 ```powershell
-cd desktop; npm test                       # 41 tests: stream client, form/settings rules, production
+cd desktop; npm test                       # 42 tests: stream client, form/settings rules, production
                                            # bundle has no mock model, hostile markdown,
                                            # shell vs a real backend
-npm run smoke                              # real Electron: 58 steps, exits 0/1
+npm run smoke                              # real Electron: 70 steps, exits 0/1 (deploys go
+                                           # to in-memory fakes, never GitHub or Render)
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP

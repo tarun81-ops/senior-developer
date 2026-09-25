@@ -3,7 +3,7 @@
 // cleared, and only ever shown back as "set" or "missing".
 import { useEffect, useState } from "react";
 
-import { draftFrom, keysToSend, modelOptions, move, pinKey, updateFrom } from "./settingsModel.js";
+import { DEPLOY_KEY_HELP, draftFrom, keyGroups, keysToSend, modelOptions, move, pinKey, updateFrom } from "./settingsModel.js";
 
 const DEV = import.meta.env.DEV;
 
@@ -131,7 +131,23 @@ function ModelSettings({ client, settings, onSaved, status, setStatus }) {
 function KeySettings({ client, settings, onSaved }) {
   const [entered, setEntered] = useState({});
   const [status, setStatus] = useState(null);
-  const names = Object.keys(settings.keys);
+  const [providerKeys, deployKeys] = keyGroups(Object.keys(settings.keys));
+  const row = (name) => (
+    <label key={name} className="key-row" data-key={name}>
+      <code>{name}</code>
+      <span className="key-status" data-status={settings.keys[name]}>{settings.keys[name]}</span>
+      <input
+        type="password"
+        name={`key-${name}`}
+        value={entered[name] ?? ""}
+        onChange={(e) => setEntered({ ...entered, [name]: e.target.value })}
+        placeholder={settings.keys[name] === "set" ? "replace" : "paste"}
+        autoComplete="new-password"
+        spellCheck={false}
+      />
+      {DEPLOY_KEY_HELP[name] && <span className="muted key-help">{DEPLOY_KEY_HELP[name]}</span>}
+    </label>
+  );
 
   async function save(event) {
     event.preventDefault();
@@ -142,7 +158,8 @@ function KeySettings({ client, settings, onSaved }) {
     setStatus({ busy: true, n: n - 1 });
     try {
       onSaved(await client.saveKeys(keys));
-      setStatus({ ok: `Saved ${Object.keys(keys).join(", ")} to .env. New runs use it.`, n });
+      const saved = Object.keys(keys);
+      setStatus({ ok: `Saved ${saved.join(", ")} to .env. New runs use ${saved.length > 1 ? "them" : "it"}.`, n });
     } catch (err) {
       setStatus({ error: err.message, n });
     }
@@ -155,21 +172,10 @@ function KeySettings({ client, settings, onSaved }) {
         Keys are saved to <code>.env</code> on this computer. They are never shown again, only
         whether each one is set.
       </p>
-      {names.map((name) => (
-        <label key={name} className="key-row" data-key={name}>
-          <code>{name}</code>
-          <span className="key-status" data-status={settings.keys[name]}>{settings.keys[name]}</span>
-          <input
-            type="password"
-            name={`key-${name}`}
-            value={entered[name] ?? ""}
-            onChange={(e) => setEntered({ ...entered, [name]: e.target.value })}
-            placeholder={settings.keys[name] === "set" ? "replace key" : "paste key"}
-            autoComplete="new-password"
-            spellCheck={false}
-          />
-        </label>
-      ))}
+      <h3>Model providers</h3>
+      {providerKeys.map(row)}
+      <h3>Deploying (GitHub Pages, Render)</h3>
+      {deployKeys.map(row)}
       {status?.error && <p className="error">{status.error}</p>}
       {status?.ok && <p className="ok">{status.ok}</p>}
       <div className="actions">

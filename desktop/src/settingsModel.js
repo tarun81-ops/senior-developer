@@ -64,3 +64,15 @@ export function keysToSend(entered) {
     Object.entries(entered).map(([name, value]) => [name, value.trim()]).filter(([, value]) => value),
   );
 }
+
+/** Deploy credentials (D41), shown apart from the model providers' keys. */
+export const DEPLOY_KEY_HELP = {
+  GITHUB_TOKEN: "fine-grained token: Administration, Contents, Pages, Workflows (read/write), Actions (read)",
+  RENDER_API_KEY: "Render account settings → API keys",
+  RENDER_OWNER_ID: "optional; only if your Render key reaches several workspaces",
+};
+
+/** Split key names into [model provider keys, deploy keys]. */
+export function keyGroups(names) {
+  return [names.filter((n) => !(n in DEPLOY_KEY_HELP)), names.filter((n) => n in DEPLOY_KEY_HELP)];
+}
