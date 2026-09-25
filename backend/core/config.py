@@ -42,11 +42,20 @@ class Settings:
 
     @classmethod
     def from_root(cls, root: Path | str) -> Settings:
+        """Paths for one root. ``data/``, ``workspace/`` and ``.env`` always
+        live under it.
+
+        ``config/`` is the root's own when it has one (the repo checkout, or a
+        test's copy). Otherwise it is the app's bundled ``config/``: an
+        installed app's data root, under %APPDATA%, holds user data only, and
+        its config updates with the app (D33).
+        """
         root = Path(root).resolve()
         data_dir = root / "data"
+        own_config = root / "config"
         return cls(
             root=root,
-            config_dir=root / "config",
+            config_dir=own_config if own_config.is_dir() else PACKAGE_ROOT / "config",
             data_dir=data_dir,
             workspace_dir=root / "workspace",
             runs_dir=data_dir / "runs",

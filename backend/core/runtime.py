@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 
 from backend.core.agents import Agent
-from backend.core.config import Settings, get_settings, load_env
+from backend.core.config import PACKAGE_ROOT, Settings, get_settings, load_env
 from backend.core.events import EventBus, JsonlWriter
 from backend.core.orchestrator.budgets import BudgetTracker
 from backend.core.provider.client import OpenAICompatClient
@@ -99,8 +99,11 @@ class Runtime:
         return self.registry.agent(name)
 
     def agent(self, name: str) -> Agent:
+        # Relative prompt paths resolve against the package, not the data root:
+        # prompt files ship with the code, and an installed app's data root
+        # (%APPDATA%) has none (D33). In a repo checkout the two are the same.
         return Agent(
-            self.registry.agent(name), router=self.router, bus=self.bus, root=self.settings.root
+            self.registry.agent(name), router=self.router, bus=self.bus, root=PACKAGE_ROOT
         )
 
     def close(self) -> None:

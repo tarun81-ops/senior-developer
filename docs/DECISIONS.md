@@ -865,6 +865,31 @@ is active instead of sharing the run's stream.
 
 ---
 
+## D33 — An installed app's data root holds user data only (Packaging)
+
+**Decision:** two path rules, so the installed app can keep its data in
+`%APPDATA%` while its code and configuration stay in the install folder:
+
+* **Config.** A root with its own `config/` (the repo checkout, or a test's
+  copy) uses it. A root without one uses the app's bundled `config/`.
+  `data/`, `workspace/` and `.env` always live under the root.
+* **Prompts.** Relative prompt paths resolve against the package (the folder
+  holding `backend/`), not the data root, because prompt files ship with the
+  code. In a repo checkout the two are the same folder, so nothing changes
+  there.
+
+**Why:** an installed app can't write into its install folder, and its
+config must update with the app while the user's runs, keys and settings
+overrides survive updates. Two rules at the point where paths are made are
+far less code than threading a separate "config dir" option through the
+launcher, `create_app`, the run manager and `Runtime.create`.
+
+**Cost accepted:** a data root is not a place for a custom `config/` unless
+you create one there deliberately. A custom prompt must use an absolute path
+if it lives outside the package.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
