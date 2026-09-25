@@ -10,7 +10,7 @@ checks guard every request:
 2. **A Host header check** — only loopback host names are served, which blocks
    DNS-rebinding attacks (a hostile page resolving its own name to 127.0.0.1).
 3. **An Origin allowlist for CORS** — only the Vite dev servers and our own
-   ``sda://`` app origin may talk to the API. CORS is a browser rule, not auth,
+   ``sda://app`` desktop origin may talk to the API. CORS is a browser rule, not auth,
    so it is defence in depth *on top of* the token, never instead of it.
 
 The token is intentionally not configurable through the environment: a token
@@ -19,7 +19,6 @@ pinned in a file would outlive the process that generated it.
 
 from __future__ import annotations
 
-import re
 import secrets
 from dataclasses import dataclass, field
 
@@ -28,23 +27,25 @@ from fastapi import Header, HTTPException, Request, status
 #: Header carrying the per-launch token on every request.
 API_KEY_HEADER = "X-API-Key"
 
-#: Origins that are served verbatim. In development the UI is Vite's dev server
-#: on 5173; in production Part B registers the custom ``sda:`` scheme (see
-#: :data:`APP_SCHEME_ORIGIN`) so the packaged renderer never reports ``null``.
+#: The only browser origins the API answers, matched exactly (no prefixes,
+#: no patterns) by both the Origin check and CORS.
+#:
+#: * ``http://127.0.0.1:5173`` / ``http://localhost:5173`` — Vite's dev server.
+#: * ``sda://app`` — the packaged desktop UI. ``sda`` ("senior developer
+#:   agents") is a custom protocol that Part B registers in Electron *before*
+#:   ``app.ready`` with ``protocol.registerSchemesAsPrivileged`` and the
+#:   privileges ``standard``, ``secure``, ``supportFetchAPI`` and
+#:   ``corsEnabled``, then serves ``ui/dist`` from ``sda://app/…``. A standard
+#:   scheme gives the renderer a real origin, ``scheme://host``; loading over
+#:   ``file://`` would report ``Origin: null`` instead, which every sandboxed
+#:   iframe and ``data:`` page also sends, so ``null`` stays denied. Part B
+#:   must use exactly this scheme and host; change both sides together.
+APP_ORIGIN = "sda://app"
 ALLOWED_ORIGINS: tuple[str, ...] = (
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    APP_ORIGIN,
 )
-
-#: Origins served from our own custom protocol.
-#:
-#: An Electron renderer loaded over ``file://`` reports ``Origin: null``, which
-#: is not a value any allowlist can usefully pin down: every sandboxed iframe and
-#: every ``data:`` page also reports ``null``. Part B therefore registers ``sda:``
-#: as a *standard, secure* scheme and serves the built UI from ``sda://app/…``,
-#: which produces a real, checkable origin. ``null`` stays denied.
-APP_SCHEME = "sda"
-APP_SCHEME_ORIGIN = re.compile(r"^sda://[a-z0-9.-]+(?::\d+)?$", re.IGNORECASE)
 
 #: Host header values we answer to. The port is whatever uvicorn is told to use,
 #: so it is checked separately from the host name.
@@ -88,7 +89,7 @@ def is_allowed_host(host_header: str | None) -> bool:
 
 
 def is_allowed_origin(origin: str | None) -> bool:
-    """True when ``Origin`` is a Vite dev server or our own ``sda://`` origin.
+    """True when ``Origin`` is exactly one of :data:`ALLOWED_ORIGINS`.
 
     A request with no ``Origin`` (Electron main process, curl, the test client)
     is *not* rejected here; only a *present, unknown* origin is a violation.
@@ -99,9 +100,7 @@ def is_allowed_origin(origin: str | None) -> bool:
     avoids the problem instead of permitting it: the shell registers the custom
     ``sda:`` scheme and loads the built UI from ``sda://app/…``.
     """
-    if origin is None:
-        return True
-    return origin in ALLOWED_ORIGINS or bool(APP_SCHEME_ORIGIN.match(origin))
+    return origin is None or origin in ALLOWED_ORIGINS
 
 
 def _too_large(received: int | None = None) -> HTTPException:

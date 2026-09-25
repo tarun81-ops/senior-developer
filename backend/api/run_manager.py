@@ -263,6 +263,16 @@ class RunManager:
             raise RunNotFound(run_id)
         return record
 
+    def is_finished(self, run_id: str) -> bool | None:
+        """``True``/``False`` for a run this process manages, ``None`` otherwise.
+
+        Read under the lock: a ``True`` here means the closing event is already
+        persisted (see :meth:`_finish_locked`).
+        """
+        with self._lock:
+            record = self._runs.get(run_id)
+            return None if record is None else record.is_terminal
+
     def list(self, *, limit: int = 50) -> list[RunRecord]:
         """Newest first, bounded so the in-memory history cannot grow forever."""
         with self._lock:
@@ -435,13 +445,13 @@ class RunManager:
             self._order.append(run_id)
             self._queue.append(run_id)
             self._trim_locked()
-        self._emit(
-            run_id,
-            "api.run_queued",
-            f"queued: {request[:120]}",
-            stages=list(options.stages),
-            project=record.project,
-        )
+            self._emit(
+                run_id,
+                "api.run_queued",
+                f"queued: {request[:120]}",
+                stages=list(options.stages),
+                project=record.project,
+            )
         self._executor.submit(self._run_worker, record)
         return record
 
@@ -474,10 +484,17 @@ class RunManager:
         out from under the router.
         """
         record = self.get(run_id)
-        if record.is_terminal:
-            return False, f"run already finished with status '{record.status}'"
-        record.cancel_requested.set()
         with self._lock:
+            # checked under the lock: a run finishing right now must not be
+            # turned back into "cancelling"
+            if record.is_terminal:
+                return False, f"run already finished with status '{record.status}'"
+            record.cancel_requested.set()
+            self._emit(
+                run_id,
+                "api.run_cancel_requested",
+                "cancellation requested; stopping at the next checkpoint",
+            )
             if record.gate is not None:
                 # Wake a run blocked at an approval gate right now: the same
                 # event approve/reject would set, never a poll (D21).
@@ -491,11 +508,6 @@ class RunManager:
             else:
                 record.status = "cancelling"
                 note = "cancellation requested"
-        self._emit(
-            run_id,
-            "api.run_cancel_requested",
-            "cancellation requested; stopping at the next checkpoint",
-        )
         return True, note
 
     # -- approval gates (Part A, step 3, D21) --------------------------------
@@ -528,16 +540,12 @@ class RunManager:
             state.decision = decision
             state.note = note
             state.decided_at = utc_now()
+            # recorded before the worker wakes, so it can never land after the
+            # run's closing event
+            detail = f"{state.gate} {decision}" + (f": {note}" if note else "")
+            self._emit(run_id, f"api.run_{decision}", detail, gate=state.gate, note=note)
             # the single wake-up: the worker's Event.wait() returns right now
             state.event.set()
-        detail = f"{state.gate} {decision}" + (f": {note}" if note else "")
-        self._emit(
-            run_id,
-            f"api.run_{decision}",
-            detail,
-            gate=state.gate,
-            note=note,
-        )
         return state
 
     def _approval_hook(self, record: RunRecord, gate: str, payload: dict) -> None:
@@ -695,19 +703,7 @@ class RunManager:
     ) -> None:
         """Set the terminal status and emit the closing event, once."""
         with self._lock:
-            if not self._finish_locked(
-                record, status, ok=ok, reason=reason, error=error
-            ):
-                return
-        self._emit(
-            record.run_id,
-            f"api.run_{status}",
-            error or f"run {status}",
-            ok=ok,
-            reason=reason,
-            calls=record.calls,
-            tokens=record.tokens,
-        )
+            self._finish_locked(record, status, ok=ok, reason=reason, error=error)
 
     def _finish_locked(
         self,
@@ -718,10 +714,12 @@ class RunManager:
         reason: str | None = None,
         error: str | None = None,
     ) -> bool:
-        """Set the terminal fields under the lock. ``False`` if already terminal.
+        """Set the terminal fields and emit the closing event, under the lock.
 
-        Separate from :meth:`_finish` so ``cancel`` can finish a queued run while
-        holding the lock (it must not block on a worker thread inside a lock).
+        ``False`` if already terminal. Every path to a terminal status comes
+        through here, so every run gets exactly one ``api.run_<status>`` event,
+        written in the same critical section that sets the status. That event is
+        the last one a run ever has, which is what lets the SSE stream end on it.
         """
         if record.is_terminal:
             return False
@@ -730,6 +728,15 @@ class RunManager:
         record.reason = reason
         record.error = error
         record.finished_at = utc_now()
+        self._emit(
+            record.run_id,
+            f"api.run_{status}",
+            error or f"run {status}",
+            ok=ok,
+            reason=reason,
+            calls=record.calls,
+            tokens=record.tokens,
+        )
         return True
 
     def _release(self, record: RunRecord) -> None:
@@ -753,7 +760,13 @@ class RunManager:
 
     # -- events --------------------------------------------------------------
     def _emit(self, run_id: str, kind: str, message: str, **data: Any) -> None:
-        """Emit an API-level event through the same store the pipeline uses."""
+        """Emit an API-level event through the same store the pipeline uses.
+
+        Callers on a request thread (create, cancel, approve/reject) and every
+        terminal transition hold ``self._lock`` while emitting, so no event can
+        be persisted after a run's closing event. The store never takes this
+        lock, so there is no lock-order cycle; the write is one SQLite row.
+        """
         try:
             self.event_store.sink(
                 Event(kind=kind, message=message, run_id=run_id, data=data)

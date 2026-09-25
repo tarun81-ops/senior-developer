@@ -25,9 +25,9 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from backend import __version__
@@ -53,6 +53,7 @@ from backend.api.models import (
 from backend.api.repository import SqliteEventRepository
 from backend.api.run_manager import GateNotWaiting, RunManager, RunNotFound, RunOptions
 from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
+from backend.api.stream import event_frames
 from backend.core.config import get_settings, load_env
 from backend.core.errors import ConfigError
 from backend.core.runtime import Runtime
@@ -145,11 +146,8 @@ def create_app(
 
     # CORS is a browser rule, not authentication: it only tells a *browser*
     # whether to let page JavaScript read the response. The token still guards
-    # every request (security.py).
-    #
-    # The app's own ``sda://`` origin is a regular expression (any host under the
-    # scheme), which CORSMiddleware cannot express, so the allowlist keeps the
-    # two Vite origins and the Origin *check* in security.py covers ``sda://``.
+    # every request (security.py). The list is the same one the Origin check
+    # uses, so the two can never disagree about the desktop UI's ``sda://app``.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(ALLOWED_ORIGINS),
@@ -193,6 +191,29 @@ def create_app(
             events=[_event_response(stored) for stored in page],
             last_seq=last_seq,
             has_more=store.last_seq(run_id) > last_seq,
+        )
+
+    @api.get("/events/stream")
+    async def stream_events(
+        run_id: str = Query(..., min_length=1, max_length=64),
+        after_seq: int | None = Query(None, ge=-1, description="Send events with seq > this"),
+        last_event_id: str | None = Header(None, alias="Last-Event-ID"),
+        store: EventStore = Depends(get_event_store),
+        manager: RunManager = Depends(get_run_manager),
+    ) -> StreamingResponse:
+        """Live SSE stream: replay after the cursor, then live, closing when the
+        run ends (D19, D23). Read with ``fetch()`` so ``X-API-Key`` is sent."""
+        if not _valid_run_id(run_id):
+            raise HTTPException(status_code=400, detail="Invalid run_id")
+        if after_seq is None:
+            # the standard SSE resume header, for non-UI consumers
+            after_seq = int(last_event_id) if (last_event_id or "").isdigit() else -1
+        if manager.is_finished(run_id) is None and store.last_seq(run_id) < 0:
+            raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+        return StreamingResponse(
+            event_frames(store, manager, run_id, after_seq=after_seq),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # -- runs (Part A, step 2) ----------------------------------------------

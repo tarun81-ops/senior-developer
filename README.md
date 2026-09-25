@@ -186,14 +186,20 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/events?run_id=<run_id>&after_seq=0"
 |---|---|
 | `GET /api/health` | Liveness + the port actually bound. Token required. |
 | `GET /api/events?run_id=&after_seq=` | Replay persisted events (D7 contract, stored in SQLite). |
+| `GET /api/events/stream?run_id=&after_seq=` | Live SSE (`text/event-stream`): replays events after the cursor, then streams new ones, then closes after the run's `api.run_succeeded` / `api.run_failed` / `api.run_cancelled` event. Each frame's `id:` is its `seq`; reconnect with the last one as `after_seq` (or `Last-Event-ID`) for no gap and no repeat. Read it with `fetch()`, not `EventSource`, so `X-API-Key` is sent (D19, D23). |
 | `GET /api/settings` | Effective model chain per agent, providers and their models, provider order, and each expected key as `set` / `missing` (never a value). |
 | `PUT /api/settings` | Replace the local overrides: `{"agents": {"coder": {"provider": "groq", "model": "..."}}, "provider_order": ["groq", "gemini"]}`. Unknown names are `422`. `{}` resets to the tracked defaults. Applies from the next run (D22). |
 | `PUT /api/settings/keys` | Write-only: `{"keys": {"GEMINI_API_KEY": "..."}}` goes to `.env`; the response reports `set` / `missing` only. |
 
 Security is deliberately boring and layered (D17): the server binds
 `127.0.0.1` only, every request must present the per-launch token, the `Host`
-header must be loopback (blocks DNS rebinding), `Origin` must be a Vite dev
-server or Electron's `file://`, and bodies over 256 KiB are refused. Events are
+header must be loopback (blocks DNS rebinding), `Origin` must be exactly a Vite
+dev server (`http://127.0.0.1:5173`, `http://localhost:5173`) or the packaged
+desktop UI's `sda://app`, and bodies over 256 KiB are refused. `sda:` is a
+custom protocol the Electron shell (Part B) registers as standard + secure +
+fetch/CORS-enabled and serves the built UI from, because a `file://` page sends
+`Origin: null`, which can't be told apart from any sandboxed iframe. The same
+list drives CORS, so the UI's preflights pass. Events are
 persisted to `data/app.db` through a repository interface (D18) so a cloud
 database can replace SQLite later; **API keys are never stored in the database**
 and are never returned by any endpoint.
@@ -212,6 +218,7 @@ backend/
     repository.py       EventRepository protocol + SQLite implementation (D18)
     event_store.py      EventBus -> repository bridge, sequence numbers, replay
     models.py           Pydantic request/response models
+    stream.py           SSE stream: replay from a cursor, then live, then close (D23)
     __main__.py         python -m backend.api (binds 127.0.0.1, prints the token)
   core/
     config.py           Settings + .env loading
@@ -223,8 +230,8 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                206 tests, no network, no keys required
-docs/DECISIONS.md       why each decision was made (D1–D22)
+  tests/                219 tests, no network, no keys required
+docs/DECISIONS.md       why each decision was made (D1–D23)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -235,7 +242,7 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 206 tests, ~20s, offline
+.\.venv\Scripts\python -m pytest          # 219 tests, ~30s, offline
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -287,7 +294,8 @@ data in prompts.
   request-size cap and SQLite-backed event replay (`data/app.db`, D17/D18).
   Steps 2–4 done: FIFO run queue with cancel (D20), approval gates (D21),
   settings with git-ignored local overrides and write-only keys (D22).
-  Next: SSE event stream (D19).
+  Step 5 done: SSE event stream with cursor resume (D19, D23).
+  Next: step 6.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

@@ -8,6 +8,7 @@ explicit requirement.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,8 @@ from backend.core.errors import ConfigError, MissingApiKey
 from backend.core.local_settings import LocalOverrides, apply_overrides, read_overrides
 from backend.core.provider.schemas import ModelSpec, ProviderSpec
 from backend.core.secrets import get_api_key
+
+logger = logging.getLogger(__name__)
 
 
 class _Base(BaseModel):
@@ -134,14 +137,47 @@ class Registry:
     def load(cls, settings: Settings, *, overrides: LocalOverrides | None = None) -> Registry:
         """Tracked ``config/*.yaml`` with the local overrides layered on top (D22).
 
-        ``overrides=None`` reads them from ``data/settings.local.yaml``; the
-        settings API passes a candidate instead, to validate it before saving.
+        ``overrides=None`` reads them from ``data/settings.local.yaml``, falling
+        back to the tracked defaults if that file is stale or corrupt (see
+        :meth:`load_effective`). The settings API passes a candidate instead, to
+        validate it before saving; a bad candidate always raises.
         """
+        if overrides is not None:
+            return cls._load(settings, overrides)
+        return cls.load_effective(settings)[0]
+
+    @classmethod
+    def load_effective(cls, settings: Settings) -> tuple[Registry, LocalOverrides]:
+        """The registry plus the overrides actually applied to it.
+
+        A bad ``data/settings.local.yaml`` (unparsable, or naming an agent,
+        provider or model that no longer exists) must not take down every run
+        and the CLI, so it is ignored with a loud warning naming the file, and
+        the tracked defaults apply. A broken *tracked* config still raises: the
+        defaults are loaded before the warning, so it never blames the wrong file.
+        """
+        path = settings.local_settings_path
+        try:
+            overrides = read_overrides(path)
+            return cls._load(settings, overrides), overrides
+        except ConfigError as exc:
+            if not path.exists():
+                raise
+            defaults = LocalOverrides()
+            registry = cls._load(settings, defaults)
+            logger.warning(
+                "IGNORING %s and using the tracked config/ defaults: %s. "
+                "Fix it with PUT /api/settings {} or delete the file.",
+                path,
+                exc,
+            )
+            return registry, defaults
+
+    @classmethod
+    def _load(cls, settings: Settings, overrides: LocalOverrides) -> Registry:
         files = settings.config_files
         limits_path = files["limits"]
         providers_raw = read_yaml(files["providers"])
-        if overrides is None:
-            overrides = read_overrides(settings.local_settings_path)
         return cls.from_dict(
             providers_raw=providers_raw,
             agents_raw=apply_overrides(

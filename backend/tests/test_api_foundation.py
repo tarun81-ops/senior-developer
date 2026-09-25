@@ -76,9 +76,9 @@ def test_origin_null_is_rejected_and_the_custom_scheme_is_allowed() -> None:
     """
     assert not is_allowed_origin("null")
     assert is_allowed_origin("sda://app")
-    assert is_allowed_origin("sda://app.local:5173")
-    # not a prefix match: sda:evil is a different scheme, and a trailing path
-    # is not an origin
+    # exact match only: no other host, port, scheme or path under sda:
+    assert not is_allowed_origin("sda://app.local:5173")
+    assert not is_allowed_origin("sda://evil")
     assert not is_allowed_origin("sda-evil://app")
     assert not is_allowed_origin("sda://app/../../etc")
 
@@ -256,17 +256,21 @@ def test_oversized_body_with_a_lying_content_length_is_refused(tmp_path: Path) -
     assert status == 413
 
 
-def test_cors_preflight_allows_the_vite_origin_only(client: TestClient) -> None:
+@pytest.mark.parametrize("origin", ["http://127.0.0.1:5173", "sda://app"])
+def test_cors_preflight_allows_the_ui_origins_only(client: TestClient, origin: str) -> None:
+    # X-API-Key is not a CORS-safelisted header, so every UI request is
+    # preflighted: an origin missing here is blocked even if the Origin check
+    # would accept it.
     ok = client.options(
         "/api/health",
         headers={
-            "Origin": "http://127.0.0.1:5173",
+            "Origin": origin,
             "Access-Control-Request-Method": "GET",
             "Access-Control-Request-Headers": "X-API-Key",
         },
     )
     assert ok.status_code == 200
-    assert ok.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+    assert ok.headers["access-control-allow-origin"] == origin
     denied = client.options(
         "/api/health",
         headers={

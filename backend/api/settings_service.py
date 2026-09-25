@@ -19,7 +19,6 @@ from backend.core.config import Settings, load_env
 from backend.core.local_settings import (
     API_KEY_PATTERN,
     LocalOverrides,
-    read_overrides,
     write_env_values,
     write_overrides,
 )
@@ -30,9 +29,12 @@ _write_lock = threading.Lock()
 
 
 def snapshot(settings: Settings) -> SettingsResponse:
-    """Effective settings: tracked config plus the saved overrides."""
-    overrides = read_overrides(settings.local_settings_path)
-    registry = Registry.load(settings, overrides=overrides)
+    """Effective settings: tracked config plus the saved overrides.
+
+    A stale or corrupt overrides file reads as no overrides (the defaults the
+    next run will really use), so the UI can still load and fix it.
+    """
+    registry, overrides = Registry.load_effective(settings)
     return SettingsResponse(
         agents=[
             AgentSettings(

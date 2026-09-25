@@ -60,11 +60,13 @@ class EventStore:
     # -- writing -------------------------------------------------------------
     def sink(self, event: Event) -> None:
         """EventBus sink: assign a sequence number, persist, wake readers."""
+        # One critical section for number + write: two threads emitting for the
+        # same run (the worker and a cancel request) must never make seq N+1
+        # visible before N, or a streaming reader would skip N for good.
         with self._condition:
             seq = self._seqs.get(event.run_id, -1) + 1
             self._seqs[event.run_id] = seq
-        self.repository.append(event, seq=seq)
-        with self._condition:
+            self.repository.append(event, seq=seq)
             self._condition.notify_all()
 
     # -- reading -------------------------------------------------------------

@@ -245,7 +245,7 @@ command keep the human in control of when execution happens.
 no flag to change it), and every `/api` route requires three independent checks:
 a **per-launch random token** in `X-API-Key`, a **Host header** that names a
 loopback address, and an **Origin** from a fixed allowlist (Vite dev servers on
-5173 and Electron's `file://`). CORS is configured to exactly those origins, and
+5173 and the desktop UI's `sda://app`). CORS is configured to exactly those origins, and
 request bodies are capped at 256 KiB. The token is generated with `secrets` at
 process start, printed once for the desktop shell, and never written to disk or
 read from the environment. Approve/reject must additionally re-check the token
@@ -258,6 +258,18 @@ stops the random web page (it cannot read the token), the Host check stops DNS
 rebinding (a hostile name resolving to loopback), and the Origin allowlist stops
 cross-origin reads in the browser. Three cheap checks beat one clever one, and
 none of them is a substitute for the sandbox (D15).
+
+**Amended (step 4→5):** the packaged UI's origin is `sda://app`, not `file://`.
+An Electron page loaded over `file://` sends `Origin: null`, which every
+sandboxed iframe and `data:` page also sends, so `null` is refused. `sda`
+("senior developer agents") is a custom protocol that Part B registers before
+`app.ready` with `protocol.registerSchemesAsPrivileged` (`standard`, `secure`,
+`supportFetchAPI`, `corsEnabled`), serving `ui/dist` from `sda://app/`. A
+standard scheme's origin is `scheme://host`, so the renderer sends exactly
+`sda://app`. The allowlist matches it exactly, and the Origin check and CORS
+share one list: an earlier version accepted any `sda://` host in the check but
+left it out of CORS, so every UI preflight (`X-API-Key` always triggers one)
+would have been refused. Part B must use this scheme and host verbatim.
 
 **Cost accepted:** a browser-based UI must be served from the allowlisted
 origins, and there is no "open this in any browser tab" convenience. The CLI
@@ -397,12 +409,59 @@ checked in the route, not by a Pydantic validator, because FastAPI's
 validation error body echoes the submitted input, and that input is the key.
 
 **Cost accepted:** settings are read when a run *starts*, so a run still in
-the queue picks up a change made after it was submitted. A stale overrides
-file, for example one naming a model later removed from `providers.yaml`,
-makes every registry load fail with a message naming the file. Fix it with
-`PUT /api/settings` `{}` or by deleting the file. Keys cannot be cleared
+the queue picks up a change made after it was submitted. A stale or corrupt
+overrides file (unparsable YAML, or one naming an agent, provider or model
+later removed from the tracked config) is **ignored**: registry loads fall
+back to the tracked `config/` defaults and log a `WARNING` naming the file,
+so a bad override cannot take down runs or the CLI. `GET /api/settings` then
+shows the defaults, which are what runs really use. A `PUT` still validates
+strictly, and `PUT /api/settings` `{}` or deleting the file clears the
+warning. A broken *tracked* config still fails loudly. Keys cannot be cleared
 through the API yet, and a key held only in Windows Credential Manager shows
 as `set` but is not written there.
+
+---
+
+## D23 — The SSE stream is one cursor over SQLite; the run's closing event ends it (Phase 4)
+
+**Decision:** `GET /api/events/stream?run_id=&after_seq=` implements D19. It
+has no separate live channel. The stream runs the replay query
+(`seq > cursor`) and sends what it finds, then blocks on the event store's
+condition variable (at most 1 s) and runs the query again. The cursor is the
+last `seq` actually sent, so replay, the replay-to-live handoff and a
+reconnect are all the same query. None of them can drop or repeat an event.
+Each frame's SSE `id` is its `seq`, and `after_seq` (or `Last-Event-ID`)
+resumes after it. The stream closes after sending the run's closing event
+(`api.run_succeeded`, `api.run_failed` or `api.run_cancelled`). A run with no
+live source (already finished, or from an earlier process) closes once the
+stream has caught up. A timestamped `: keepalive` comment goes out after about
+20 s of silence. The route sits under the token-guarded router like every
+other.
+
+Two ordering guarantees were added to make "closing event sent" mean "every
+event sent":
+
+* the event store numbers and writes an event in one critical section, so two
+  threads emitting for one run (worker and a cancel request) can never make
+  `seq` N+1 visible before N;
+* the run manager writes a run's closing event in the same locked step that
+  sets its terminal status, and writes every request-thread event (queued,
+  cancel requested, approved/rejected) under that lock too. Nothing can land
+  after the closing event. A run cancelled while still queued now gets one
+  as well; before, it got none.
+
+**Why:** two sources (a DB replay plus an in-memory live queue) need a merge
+step, and that merge is where gaps and duplicates come from. With one
+cursor over one ordered table, correctness follows from the primary key. The
+cost of waking and re-querying is one indexed read of a sub-millisecond
+SQLite table per event batch, for the one or two local clients a desktop app
+has.
+
+**Cost accepted:** each open stream holds a thread-pool thread for up to
+1 s at a time while waiting. That is fine for a local UI, but a
+many-client server would need an async notifier. The event write is now
+inside the store's lock, which serialises event writes across runs; with one
+active run (D20) that costs nothing.
 
 ---
 
@@ -414,6 +473,6 @@ as `set` but is not written there.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 4 of 6: settings) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 5 of 6: SSE stream) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

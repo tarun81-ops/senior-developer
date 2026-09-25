@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from backend.api.app import create_app
 from backend.core.config import PACKAGE_ROOT, Settings
+from backend.core.local_settings import LocalOverrides
 from backend.core.provider.registry import Registry
 
 TOKEN = "test-token-not-secret"
@@ -175,3 +176,37 @@ def test_override_survives_a_restart(root: Path) -> None:
     coder = next(a for a in body["agents"] if a["agent"] == "coder")
     assert coder["override"] == PIN
     assert body["provider_order"] == ["openrouter", "gemini"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "agents: [not, a, mapping\n",  # corrupt: not YAML
+        "agents:\n  coder: {provider: groq, model: retired-model}\n",  # stale model
+        "agents:\n  retired_agent: {provider: groq, model: x}\n",  # stale agent
+    ],
+)
+def test_a_bad_overrides_file_falls_back_to_defaults_with_a_warning(
+    client: TestClient, root: Path, text: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bad settings.local.yaml must not break every run, the CLI, or GET."""
+    path = root / "data" / "settings.local.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    defaults = Registry.load(Settings.from_root(root), overrides=LocalOverrides())
+
+    with caplog.at_level("WARNING"):
+        registry = Registry.load(Settings.from_root(root))
+    assert registry.agent("coder").routing == defaults.agent("coder").routing
+    assert any("IGNORING" in r.message and str(path) in r.message for r in caplog.records)
+
+    body = client.get("/api/settings").json()
+    assert chain(body, "coder")[0] == ("gemini", "gemini-3.8-flash")
+    assert all(a["override"] is None for a in body["agents"])
+    # a PUT still validates strictly, and {} repairs the file
+    stale = {"agents": {"coder": {"provider": "groq", "model": "retired-model"}}}
+    assert client.put("/api/settings", json=stale).status_code == 422
+    assert client.put("/api/settings", json={}).status_code == 200
+    caplog.clear()
+    Registry.load(Settings.from_root(root))
+    assert not caplog.records
