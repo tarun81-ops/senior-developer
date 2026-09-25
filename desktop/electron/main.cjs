@@ -119,6 +119,11 @@ function smokeRoot() {
   const tests = path.join(root, "workspace", "smoke-gates", "tests");
   fs.mkdirSync(tests, { recursive: true });
   fs.writeFileSync(path.join(tests, "test_ok.py"), "def test_ok():\n    pass\n");
+  // Hostile content for the file viewer: it must show this as inert text.
+  fs.writeFileSync(
+    path.join(root, "workspace", "smoke-gates", "notes.md"),
+    '# Notes\n<img src=x onerror="document.title=\'pwned\'">\n<script>document.title="pwned"</script>\n[click](javascript:alert(1))\n',
+  );
   return root;
 }
 
@@ -149,7 +154,7 @@ async function smoke(win) {
   for (const s of report.steps) {
     console.log(`smoke: ${s.ok ? "ok  " : "FAIL"} ${s.name}${s.detail === undefined ? "" : ` (${JSON.stringify(s.detail)})`}`);
   }
-  if (report.error) console.log(`smoke: FAIL ${report.error}`);
+  if (report.error) console.log(`smoke: FAIL ${report.error}${report.page ? ` ${JSON.stringify(report.page)}` : ""}`);
   if (process.env.SDA_SMOKE_SCREENSHOT) {
     // for reviewing the screen as the smoke left it
     fs.writeFileSync(process.env.SDA_SMOKE_SCREENSHOT, (await win.webContents.capturePage()).toPNG());

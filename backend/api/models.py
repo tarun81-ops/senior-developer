@@ -367,6 +367,42 @@ class ProjectSummary(BaseModel):
     created_at: str | None = None
 
 
+class WorkspaceFileEntry(BaseModel):
+    """One file on disk in a run's project folder (path relative to it)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    size: int
+
+
+class RunFilesResponse(BaseModel):
+    """``GET /api/runs/{id}/files``: what is actually on disk (D30)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    project: str
+    files: list[WorkspaceFileEntry] = Field(default_factory=list)
+    #: True when the listing stopped at its cap
+    truncated: bool = False
+
+
+class FileContentResponse(BaseModel):
+    """``GET /api/runs/{id}/files/content``: one file, read-only and capped (D30)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    path: str
+    size: int
+    #: UTF-8 text, or None when the file is binary
+    content: str | None
+    binary: bool
+    #: True when only the first part of a large file is included
+    truncated: bool
+
+
 class ProjectsListResponse(BaseModel):
     """``GET /api/projects`` returns this shape, newest folder first."""
 

@@ -129,6 +129,9 @@ export function createClient({ baseUrl, token, fetch: fetchImpl = globalThis.fet
     cancel: (id) => request("POST", `/api/runs/${encodeURIComponent(id)}/cancel`),
     approve: (id, note) => request("POST", `/api/runs/${encodeURIComponent(id)}/approve`, { note }),
     reject: (id, note) => request("POST", `/api/runs/${encodeURIComponent(id)}/reject`, { note }),
+    listFiles: (id) => request("GET", `/api/runs/${encodeURIComponent(id)}/files`),
+    readFile: (id, path) =>
+      request("GET", `/api/runs/${encodeURIComponent(id)}/files/content?${new URLSearchParams({ path })}`),
     followRun,
   };
 }

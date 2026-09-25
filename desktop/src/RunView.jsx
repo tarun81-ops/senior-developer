@@ -6,6 +6,10 @@ import { useEffect, useRef, useState } from "react";
 
 import { CLOSING_KINDS } from "./api.js";
 import ApprovalDialog from "./ApprovalDialog.jsx";
+import FilesView from "./FilesView.jsx";
+import TaskBoard from "./TaskBoard.jsx";
+
+const TABS = [["timeline", "Timeline"], ["board", "Task board"], ["files", "Files"]];
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -20,17 +24,24 @@ export default function RunView({ client, runId }) {
   // The dialog opens for each new wait (a gate can open again, e.g. the
   // execution gate on a fix-loop rerun). "Decide later" hides it until the next.
   const [dismissedWait, setDismissedWait] = useState(0);
+  const [tab, setTab] = useState("timeline");
   const latest = useRef(0);
 
   useEffect(() => {
     const abort = new AbortController();
     // Only the newest response is applied, so two overlapping reads can never
-    // leave an older state on screen.
+    // leave an older state on screen. A failed read is retried while it is
+    // still the newest: swallowing it would leave a stale state (e.g. no
+    // approval dialog for a run that is waiting) until the next event.
     const refresh = () => {
       const ticket = ++latest.current;
-      client.getRun(runId).then((state) => {
-        if (ticket === latest.current && !abort.signal.aborted) setRun(state);
-      }).catch(() => {});
+      const current = () => ticket === latest.current && !abort.signal.aborted;
+      const attempt = () => client.getRun(runId).then((state) => {
+        if (current()) setRun(state);
+      }).catch(() => {
+        if (current()) setTimeout(attempt, 1000);
+      });
+      attempt();
     };
     refresh();
     client
@@ -85,7 +96,16 @@ export default function RunView({ client, runId }) {
       {run?.error && <p className="error">{run.error}</p>}
       {streamError && <p className="error">Event stream: {streamError}</p>}
       {run && <StageTimeline stages={run.stage_states} />}
-      <EventLog events={events} />
+      <div className="tabs" role="tablist">
+        {TABS.map(([id, label]) => (
+          <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab === "timeline" && <EventLog events={events} />}
+      {tab === "board" && run && <TaskBoard run={run} />}
+      {tab === "files" && <FilesView client={client} runId={runId} refreshKey={run?.status} />}
     </section>
   );
 }

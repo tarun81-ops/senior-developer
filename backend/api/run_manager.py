@@ -149,6 +149,9 @@ class RunRecord:
     #: one from its own settings — otherwise a run with a different root would
     #: report an empty board.
     board_path: str = ""
+    #: This run's own project folder, recorded for the same reason as
+    #: board_path. The file viewer reads only inside it (D30).
+    project_dir: str = ""
     #: set by POST /cancel; the pipeline polls it at its own checkpoints
     cancel_requested: threading.Event = field(default_factory=threading.Event)
     #: the current (or last) approval gate this run paused at; None when the
@@ -313,6 +316,11 @@ class RunManager:
                 return self._queue.index(run_id) + 1
             except ValueError:  # pragma: no cover - races with a worker starting
                 return None
+
+    def project_dir(self, run_id: str) -> Path | None:
+        """The run's project folder, or None before its pipeline has started."""
+        record = self.get(run_id)
+        return Path(record.project_dir) if record.project_dir else None
 
     def board(self, run_id: str) -> TaskBoard | None:
         """Load the run's task board from disk, if the pipeline has written one.
@@ -638,6 +646,9 @@ class RunManager:
             with self._lock:
                 self._pipelines[record.run_id] = pipeline
                 record.board_path = str(pipeline.board_path)
+                record.project_dir = str(
+                    runtime.settings.workspace_dir / slugify(record.project)
+                )
             self._apply_result(record, pipeline.run(record.request))
         except RunCancelled as exc:
             self._finish(record, "cancelled", error=str(exc), reason="cancelled")

@@ -43,8 +43,9 @@ FAKE_KEYS = {
     "GROQ_API_KEY": "gsk_e2e-groq-secret-0123456789",
 }
 
-#: The whole Part A surface. A new route fails test_the_api_surface_is_pinned
-#: until it is added here, tested, and documented in the README.
+#: The whole API surface (Part A, plus the B4 file routes). A new route fails
+#: test_the_api_surface_is_pinned until it is added here, tested, and
+#: documented in the README.
 SURFACE = {
     ("GET", "/api/health"),
     ("GET", "/api/events"),
@@ -55,6 +56,8 @@ SURFACE = {
     ("POST", "/api/runs/{run_id}/cancel"),
     ("POST", "/api/runs/{run_id}/approve"),
     ("POST", "/api/runs/{run_id}/reject"),
+    ("GET", "/api/runs/{run_id}/files"),
+    ("GET", "/api/runs/{run_id}/files/content"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
     ("PUT", "/api/settings/keys"),
@@ -243,7 +246,8 @@ def test_the_api_surface_is_pinned(root: Path) -> None:
 def test_every_api_route_requires_the_token(server: str, method: str, path: str) -> None:
     url = server + path.replace("{run_id}", "20260925-000000-abcd")
     for headers in ({}, {"X-API-Key": "wrong"}):
-        response = httpx.request(method, url, params={"run_id": "x"}, json={}, headers=headers)
+        params = {"run_id": "x", "path": "a.txt"}
+        response = httpx.request(method, url, params=params, json={}, headers=headers)
         assert response.status_code == 401, (method, path, headers)
 
 

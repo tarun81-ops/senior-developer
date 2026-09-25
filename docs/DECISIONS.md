@@ -687,6 +687,66 @@ until you choose **Decide later**.
 
 ---
 
+## D30 — Run files: read-only, one run's folder, shown as text (Phase 4, Part B)
+
+**Decision:** two new token-guarded routes, both read-only (other methods are
+`405`), give the UI the files of one run.
+
+* **Listing.** `GET /api/runs/{id}/files` lists what is actually on disk in
+  that run's project folder, not what the manifest claims.
+  * Sorted relative paths and sizes, capped at 500.
+  * `.git`, `node_modules`, `.venv`/`venv`, `__pycache__` and tool caches
+    are skipped.
+  * Directory links are not followed, and a file whose resolved path leaves
+    the folder is not listed.
+* **Reading.** `GET /api/runs/{id}/files/content?path=` returns one file.
+  * The path goes through `safe_relative_path` (D15), is resolved, and must
+    still be inside the folder, so `..`, absolute paths, drive letters, UNC
+    paths, NUL bytes, device names, symlinks and junctions pointing outside
+    are all a `400`.
+  * At most 256 KiB is returned, with `truncated`, and a cut never splits a
+    UTF-8 character.
+  * A file with a NUL byte, or one that isn't valid UTF-8, comes back as
+    `binary: true` with no content.
+* **Which folder.** The run records its project folder when its pipeline is
+  built, like `board_path`, because a runtime may be rooted elsewhere than the
+  API. A run that hasn't started has an empty listing, and reading from it is
+  a `404`.
+* **UI.**
+  * The Files tab shows contents only as text in a `<pre>`, never as markdown
+    or HTML, whatever the extension.
+  * The Task board tab renders stage output through `SafeMarkdown` (D29).
+  * The routes join the pinned API surface (D24), which is now 15 routes.
+* **Tests.**
+  * pytest covers real manifest files, nine escape paths, a Windows junction
+    pointing outside (junctions need no special rights, so they are the real
+    risk there), a symlink (skipped without symlink rights), the cap with a
+    split character, binary and non-UTF-8 files, skipped folders, the listing
+    cap, a queued run, and read-only methods.
+  * The smoke test opens a hostile `notes.md` (script, `img onerror`,
+    `javascript:` link) in the viewer and checks it shows as inert text and
+    changes nothing.
+
+**Why:** reviewing a run means reading what it produced, and D15's sandbox
+already defines exactly which folder that is. This deliberately relaxes
+`/api/projects`' "never file contents" rule, but only per run, read-only,
+bounded, and behind the token. Showing contents as text is what keeps a
+model-written file from becoming markup in the window that holds the approve
+button.
+
+**Also fixed in B4:** the run screen swallowed a failed
+`GET /api/runs/{id}`, which could leave a stale state on screen, for example
+no approval dialog for a run that is waiting, until the next event. A
+failed read is now retried every second while it is still the newest. The
+smoke failed once in 19 hidden-window runs with exactly that symptom. The
+cause was not proven, but this was the one path that could produce it. The
+smoke now records the page state on any failure.
+
+**Cost accepted:** no syntax highlighting, no editing, and no view of files
+outside the run's own folder. Large files show only their first 256 KiB.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -695,6 +755,6 @@ until you choose **Decide later**.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B3 done, B4 next) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B4 done, B5 next) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

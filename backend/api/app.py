@@ -41,10 +41,12 @@ from backend.api.models import (
     CreateRunRequest,
     EventResponse,
     EventsPageResponse,
+    FileContentResponse,
     HealthResponse,
     KeysUpdateRequest,
     ProjectsListResponse,
     ProjectSummary,
+    RunFilesResponse,
     RunsListResponse,
     RunStateResponse,
     SettingsResponse,
@@ -54,9 +56,11 @@ from backend.api.repository import SqliteEventRepository
 from backend.api.run_manager import GateNotWaiting, RunManager, RunNotFound, RunOptions
 from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
 from backend.api.stream import event_frames
+from backend.api.workspace_files import list_files, read_file
 from backend.core.config import get_settings, load_env
 from backend.core.errors import ConfigError
 from backend.core.runtime import Runtime
+from backend.core.workspace.sandbox import UnsafePath
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +285,50 @@ def create_app(
             status=manager.get(run_id).status,
             note=note,
         )
+
+    # -- run files (Part B, B4; D30) -------------------------------------------
+    # Read-only, and only inside the run's own project folder.
+    @api.get("/runs/{run_id}/files", response_model=RunFilesResponse)
+    def list_run_files(
+        run_id: str,
+        manager: RunManager = Depends(get_run_manager),
+    ) -> RunFilesResponse:
+        """Files on disk in the run's project folder (empty before it starts)."""
+        try:
+            record = manager.get(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        folder = manager.project_dir(run_id)
+        files, truncated = list_files(folder) if folder else ([], False)
+        return RunFilesResponse(
+            run_id=run_id,
+            project=record.project,
+            files=[{"path": path, "size": size} for path, size in files],
+            truncated=truncated,
+        )
+
+    @api.get("/runs/{run_id}/files/content", response_model=FileContentResponse)
+    def read_run_file(
+        run_id: str,
+        path: str = Query(..., min_length=1, max_length=512),
+        manager: RunManager = Depends(get_run_manager),
+    ) -> FileContentResponse:
+        """One file's text (capped; binary files are reported, not decoded)."""
+        try:
+            folder = manager.project_dir(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if folder is None:
+            raise HTTPException(status_code=404, detail="This run has no project folder yet")
+        try:
+            found = read_file(folder, path)
+        except UnsafePath as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (FileNotFoundError, OSError):
+            raise HTTPException(
+                status_code=404, detail="No such file in this run's project"
+            ) from None
+        return FileContentResponse(run_id=run_id, **found.__dict__)
 
     # -- approval gates (Part A, step 3) -------------------------------------
     # D17: these two routes re-check the token at the call site, on top of the

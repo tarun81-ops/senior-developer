@@ -48,3 +48,25 @@ dialog.approval h2 { margin-top: 0; font-size: 18px; }
 pre.verbatim { margin: 0; padding: 6px 8px; background: #f6f6f6; border: 1px solid #ddd; border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 button.approve { font-weight: 600; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid #ddd; margin: 8px 0; }
+.tabs button { border: 1px solid transparent; border-bottom: none; background: none; border-radius: 6px 6px 0 0; }
+.tabs button[aria-selected="true"] { border-color: #ddd; background: #fff; font-weight: 600; margin-bottom: -1px; }
+.board { display: grid; gap: 8px; }
+.stage-card { border: 1px solid #ddd; border-radius: 6px; padding: 8px 10px; }
+.stage-card header { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.stage-card[data-status="done"] { border-left: 4px solid #4caf50; }
+.stage-card[data-status="failed"] { border-left: 4px solid #d32f2f; }
+.stage-card[data-status="running"] { border-left: 4px solid #3b82f6; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0; font-size: 13px; }
+.facts dt { color: #666; }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.notes { margin: 4px 0; font-size: 13px; }
+pre.output { max-height: 300px; overflow: auto; }
+.files { display: grid; grid-template-columns: minmax(200px, 1fr) 2fr; gap: 12px; }
+.file-list ul { list-style: none; padding: 0; margin: 6px 0; font-size: 13px; }
+.file-list .row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.file-list, .file-view { min-width: 0; }
+.file-list .row span { overflow-wrap: anywhere; }
+.file-link { background: none; border: none; padding: 0; color: #1a56db; cursor: pointer; font-family: ui-monospace, monospace; text-align: left; overflow-wrap: anywhere; }
+.file-link[aria-current="true"] { font-weight: 700; }
+pre.code { max-height: 60vh; overflow: auto; white-space: pre; }

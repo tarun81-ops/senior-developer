@@ -203,6 +203,8 @@ actually bound. There is no `--host` flag: the bind is always `127.0.0.1`.
 | `POST /api/runs/{run_id}/cancel` | Cancel: a queued run never starts; a running one stops at the next checkpoint (a running command's process tree is killed); a gate wakes immediately. |
 | `POST /api/runs/{run_id}/approve` | Approve the gate the run is waiting at (`409` if it isn't waiting). Optional `{"note": "..."}`. |
 | `POST /api/runs/{run_id}/reject` | Reject it: the run ends `failed` with reason `rejected` and the note as its error (D21). |
+| `GET /api/runs/{run_id}/files` | Files actually on disk in that run's project folder: relative paths and sizes. Tool folders (`node_modules`, `.git`, `.venv`, caches) are skipped, and the listing is capped at 500 (D30). |
+| `GET /api/runs/{run_id}/files/content?path=` | One file from that folder, read-only: UTF-8 text capped at 256 KiB, with `binary: true` instead of content for binary files. Paths that leave the folder are refused, including through a symlink or junction (`400`) (D30). |
 | `GET /api/projects` | Project folders under `workspace/`: names, file counts, timestamps; never paths outside it or file contents. |
 | `GET /api/events?run_id=&after_seq=` | Replay persisted events (D7 contract, stored in SQLite). |
 | `GET /api/events/stream?run_id=&after_seq=` | Live SSE (`text/event-stream`): replays events after the cursor, then streams new ones, then closes after the run's `api.run_succeeded` / `api.run_failed` / `api.run_cancelled` event. Each frame's `id:` is its `seq`; reconnect with the last one as `after_seq` (or `Last-Event-ID`) for no gap and no repeat. Read it with `fetch()`, not `EventSource`, so `X-API-Key` is sent (D19, D23). |
@@ -238,8 +240,8 @@ phases, each ending with something you can run:
 | B1 | App shell: backend launch, token handoff, `sda://app` serving, health shown in the window | **done** |
 | B2 | Create a run + live event timeline | **done** |
 | B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | **done** |
-| B4 | Task board + read-only file viewer | next |
-| B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | |
+| B4 | Task board + read-only file viewer | **done** |
+| B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | next |
 | B6 | Run history + polish | |
 
 Install and run (PowerShell, from the repo root; Node 20+ and the `.venv`
@@ -255,7 +257,8 @@ npm run dev        # development: Vite hot reload + Electron
 npm test           # client, form rules, bundle check, shell vs a real backend (offline)
 npm run smoke      # real Electron: security checks, then drives offline mock runs
                    # through the UI: success, cancel at a gate, and all three
-                   # approval dialogs (approve plan + architecture, reject execution)
+                   # approval dialogs (approve plan + architecture, reject execution),
+                   # the task board, and the file viewer on a hostile file
 ```
 
 What B2 gives you:
@@ -284,6 +287,19 @@ What B3 gives you: when a run reaches a gate, an approval dialog opens.
   closes the dialog and leaves the run waiting; **Review and decide** reopens
   it. The note field has focus when the dialog opens, so pressing Enter can
   never approve by accident.
+
+What B4 gives you: each run has three tabs.
+
+- **Timeline** is the live event log.
+- **Task board** has one card per stage: status, the model that answered,
+  attempts, time, tokens, the reviewer's verdict, notes and errors. Each
+  stage's output can be expanded and is shown as sanitized markdown. Below
+  the stages are the latest test run (command, result, stdout/stderr) and the
+  budget used.
+- **Files** lists what is actually on disk in the run's project folder. Click
+  a file to read it. Contents are always plain text, never rendered, whatever
+  the file type, so a model-written `.md` or `.html` file cannot inject
+  anything.
 - **Developer menu.** In development builds (`npm run dev`) a **Developer**
   menu offers the offline mock model, so you can try runs without spending
   quota. Production builds (`npm start`) don't contain it, and a test builds
@@ -328,6 +344,7 @@ backend/
     stream.py           SSE stream: replay from a cursor, then live, then close (D23)
     run_manager.py      FIFO run queue, cancel, approval gates (D20, D21)
     settings_service.py settings snapshot, override validation, write-only keys (D22)
+    workspace_files.py  read-only listing/reading inside one run's project folder (D30)
     __main__.py         python -m backend.api (binds 127.0.0.1, prints the token)
   core/
     config.py           Settings + .env loading
@@ -339,7 +356,7 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                244 tests, no network, no keys required
+  tests/                264 tests, no network, no keys required
 desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
   electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
@@ -351,8 +368,10 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   src/RunView.jsx       status, stage timeline, live event log, cancel
   src/ApprovalDialog.jsx  plan/architecture/execution dialogs, approve/reject
   src/SafeMarkdown.js   sanitizing markdown renderer: no HTML, no links, no images
+  src/TaskBoard.jsx     stage cards, test result, budget
+  src/FilesView.jsx     file list + read-only plain-text viewer
   test/                 node --test: client, form rules, bundle, hostile markdown, shell
-docs/DECISIONS.md       why each decision was made (D1–D29)
+docs/DECISIONS.md       why each decision was made (D1–D30)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -363,14 +382,14 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 244 tests, ~50s, offline
+.\.venv\Scripts\python -m pytest          # 264 tests (1 skipped without symlink rights), ~50s
 ```
 
 ```powershell
 cd desktop; npm test                       # 34 tests: stream client, form rules, production
                                            # bundle has no mock model, hostile markdown,
                                            # shell vs a real backend
-npm run smoke                              # real Electron: 29 steps, exits 0/1
+npm run smoke                              # real Electron: 36 steps, exits 0/1
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -437,7 +456,8 @@ data in prompts.
   New run form (execution gate on by default), live stage timeline and event
   log, cancel, development-only mock model (D28). B3 done: approval dialogs
   for all three gates, sanitized markdown with no clickable links, verbatim
-  command/folder/time limit at the execution gate (D29). Next: B4.
+  command/folder/time limit at the execution gate (D29). B4 done: task board,
+  read-only file viewer, two sandboxed read-only file routes (D30). Next: B5.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

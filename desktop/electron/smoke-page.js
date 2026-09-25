@@ -130,8 +130,47 @@
     step("the log records both approvals and the rejection",
       kinds3.filter((k) => k === "api.run_approved").length === 2 && kinds3.includes("api.run_rejected"));
     step("no command ran", !kinds3.includes("exec.start"));
+
+    // -- B4: task board and read-only file viewer ------------------------------
+    const tab = (label) => [...document.querySelectorAll(".tabs button")].find((b) => b.textContent === label);
+    tab("Task board").click();
+    const planner = await until(() => $('.stage-card[data-stage="planner"]'), "the task board");
+    step("board shows each stage with its status", planner.dataset.status === "done"
+      && $('.stage-card[data-stage="tester"]')?.dataset.status === "done", planner.dataset.status);
+    step("board shows which model answered", /mock\/mock-echo/.test(planner.textContent));
+    planner.querySelector("details summary").click();
+    step("stage output opens as sanitized markdown", planner.querySelector("details .markdown")?.textContent.includes("MOCK OK"));
+    step("board content is inert", !$(".board").querySelector("a, img, script, iframe, [href], [src]"));
+
+    tab("Files").click();
+    const listed = await until(() => {
+      const names = [...document.querySelectorAll(".file-link")].map((b) => b.textContent);
+      return names.length ? names : null;
+    }, "the file list");
+    step("files list what is on disk", listed.includes("tests/test_ok.py") && listed.includes("notes.md"), listed);
+    const open = async (name) => {
+      [...document.querySelectorAll(".file-link")].find((b) => b.textContent === name).click();
+      return until(() => {
+        const shown = $(".file-view code")?.textContent === name && $('[data-field="file-content"]');
+        return shown || null;
+      }, `the content of ${name}`);
+    };
+    let content = await open("tests/test_ok.py");
+    step("a file opens as its exact text", content.textContent === "def test_ok():\n    pass\n", content.textContent);
+    content = await open("notes.md");
+    step("hostile file content is shown as text", content.textContent.includes('<img src=x onerror=')
+      && content.textContent.includes("<script>"));
+    step("and none of it became markup", !$(".file-view").querySelector("img, script, a, h1") && document.title !== "pwned");
   } catch (err) {
     report.error = err.message;
+    // what the screen looked like when it failed
+    report.page = {
+      status: pill(),
+      notice: $(".notice")?.textContent,
+      dialogs: [...document.querySelectorAll("dialog")].map((d) => ({ open: d.open, title: d.querySelector("h2")?.textContent })),
+      lastEvents: [...document.querySelectorAll(".events tr")].slice(-6).map((r) => r.dataset.kind),
+      visibility: document.visibilityState,
+    };
   }
   report.ok = !report.error && report.steps.every((s) => s.ok);
   return report;
