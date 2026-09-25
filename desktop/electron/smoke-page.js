@@ -28,7 +28,7 @@
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
   const setChecked = (el, want) => { if (el.checked !== want) el.click(); };
-  const pill = () => $(".status-pill")?.dataset.status;
+  const pill = () => $(".run .status-pill")?.dataset.status; // the run view, not the runs list
 
   try {
     // -- B1: connection and the locked-down page (D26) ----------------------
@@ -221,6 +221,38 @@
     step("the key is gone from the page",
       !document.body.innerText.includes(FAKE_KEY)
       && [...document.querySelectorAll("input")].every((i) => i.value !== FAKE_KEY));
+
+    // -- B6: run history, cancel from the dialog, window title ---------------------
+    nav("Runs").click();
+    const items = await until(() => {
+      const found = [...document.querySelectorAll(".run-item")];
+      return found.length >= 3 ? found : null;
+    }, "the runs list");
+    const statuses = items.map((b) => b.querySelector(".status-pill").dataset.status);
+    step("history lists every run newest first", JSON.stringify(statuses.slice(0, 3)) === '["failed","cancelled","succeeded"]', statuses);
+    step("the current run is highlighted", items[0].getAttribute("aria-current") === "true");
+
+    items[2].click(); // the first run of this session
+    await until(() => $(".run h2")?.textContent === "smoke: a tiny calculator", "the old run to open");
+    await until(() => pill() === "succeeded", "its status");
+    await until(() => [...document.querySelectorAll(".events tr")].at(-1)?.dataset.kind === "api.run_succeeded", "its replayed log");
+    step("an earlier run reopens with its replayed log",
+      document.querySelectorAll(".events tr").length > 5 && $(".run-item[aria-current]")?.dataset.run === items[2].dataset.run);
+
+    // the Settings round-trip remounted the form: pick the offline mock again
+    setChecked(await until(() => $(".dev-menu input"), "the dev menu"), true);
+    step("offline mock re-selected before starting", $(".dev-menu input").checked);
+    type($("textarea[name=request]"), "smoke: cancel from the dialog");
+    setChecked(checkbox("gate-plan"), true);
+    button("Start run").click();
+    d = await waitDialog("plan");
+    step("the window title flags the waiting approval", /Approval needed \(plan\)/.test(document.title), document.title);
+    [...d.querySelectorAll("button")].find((b) => b.textContent.trim() === "Cancel run").click();
+    await until(() => pill() === "cancelled", "the cancel from the dialog");
+    step("Cancel run inside the dialog cancels the run", !dialog() && pill() === "cancelled");
+    step("the title is back to normal", document.title === "Senior Developer Agents", document.title);
+    await until(() => $(".run-item")?.querySelector(".status-pill")?.dataset.status === "cancelled", "the list to update");
+    step("the list shows the new run's final status", $(".run-item").querySelector(".status-pill").dataset.status === "cancelled");
   } catch (err) {
     report.error = err.message;
     // what the screen looked like when it failed

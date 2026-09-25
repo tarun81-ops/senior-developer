@@ -18,8 +18,8 @@ crash.
 > tests drive another coder round just like a review objection.
 > **Phase 4 wraps that pipeline in a local FastAPI server** for the Electron
 > desktop UI (see [Local API](#local-api-phase-4-part-a--done) and
-> [Desktop app](#desktop-app-phase-4-part-b--in-progress)). The API is done;
-> the desktop UI is being built in reviewed phases.
+> [Desktop app](#desktop-app-phase-4-part-b--done)). Both are done; packaging
+> the app as an installer is the one thing deferred.
 
 ---
 
@@ -198,7 +198,7 @@ actually bound. There is no `--host` flag: the bind is always `127.0.0.1`.
 |---|---|
 | `GET /api/health` | Liveness + the port actually bound. |
 | `POST /api/runs` | Queue a run (`202`): `{"request": "...", "project"?, "stages"?, "approval_gates"?: ["plan", "architecture", "execution"], "provider"?, "model"?, "override"?, "dry_run"?, "no_apply"?, "no_run_tests"?}`. One run executes at a time; the rest wait in FIFO order (D20). |
-| `GET /api/runs?limit=` | Runs from this process, newest first, plus the active run id. |
+| `GET /api/runs?limit=` | Runs newest first, including runs from earlier launches (saved in `data/app.db`), plus the active run id. A run that was still active when the app last stopped shows as `failed` with reason `interrupted` (D32). |
 | `GET /api/runs/{run_id}` | Full state: status, queue position, open gate and its payload, board, agent outputs, files written, test results, budget. |
 | `POST /api/runs/{run_id}/cancel` | Cancel: a queued run never starts; a running one stops at the next checkpoint (a running command's process tree is killed); a gate wakes immediately. |
 | `POST /api/runs/{run_id}/approve` | Approve the gate the run is waiting at (`409` if it isn't waiting). Optional `{"note": "..."}`. |
@@ -230,7 +230,7 @@ and are never returned by any endpoint.
 
 ---
 
-## Desktop app (Phase 4, Part B — in progress)
+## Desktop app (Phase 4, Part B — done)
 
 `desktop/` is the Electron shell plus the React/Vite UI. It is built in
 phases, each ending with something you can run:
@@ -242,7 +242,7 @@ phases, each ending with something you can run:
 | B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | **done** |
 | B4 | Task board + read-only file viewer | **done** |
 | B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | **done** |
-| B6 | Run history + polish | next |
+| B6 | Run history + polish | **done** |
 
 Install and run (PowerShell, from the repo root; Node 20+ and the `.venv`
 from the Quickstart):
@@ -259,7 +259,8 @@ npm run smoke      # real Electron: security checks, then drives offline mock ru
                    # through the UI: success, cancel at a gate, and all three
                    # approval dialogs (approve plan + architecture, reject execution),
                    # the task board, the file viewer on a hostile file, and
-                   # settings (ignored-file warning, pin, reorder, reset, key)
+                   # settings (ignored-file warning, pin, reorder, reset, key),
+                   # history (reopen a run), and cancel from the dialog
 ```
 
 What B2 gives you:
@@ -317,6 +318,23 @@ What B5 gives you: a **Settings** screen, next to **Runs** in the header.
   (D22). The **Settings** tab gets a red **!** from startup, and the screen
   names the file and the reason. Saving replaces the file and clears the
   warning.
+
+What B6 gives you:
+
+- **Run history.** A **Runs** list under the New run form shows every run,
+  newest first, with its status, including runs from earlier launches of
+  the app. Click one to reopen it: its log is replayed, and its task board
+  and files are there as before. The list refreshes while any run is still
+  active.
+- **Interrupted runs.** A run that was active when the app was killed or
+  crashed comes back as `failed`, reason `interrupted`. It can't be
+  resumed, but it is not lost.
+- **Cancel run** is also inside the approval dialog. The page behind the
+  dialog can't be clicked, so before this you had to choose **Decide later**
+  first.
+- **Window title.** While a run waits for you, the title reads "Approval
+  needed (plan) · Senior Developer Agents", visible in the taskbar and
+  Alt+Tab.
 - **Developer menu.** In development builds (`npm run dev`) a **Developer**
   menu offers the offline mock model, so you can try runs without spending
   quota. Production builds (`npm start`) don't contain it, and a test builds
@@ -373,7 +391,7 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                264 tests, no network, no keys required
+  tests/                270 tests, no network, no keys required
 desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
   electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
@@ -389,8 +407,9 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   src/FilesView.jsx     file list + read-only plain-text viewer
   src/SettingsView.jsx  models, provider order, write-only keys, warnings
   src/settingsModel.js  settings rules: pickable providers, request body, keys
+  src/RunsList.jsx      run history, newest first, polled while a run is active
   test/                 node --test: client, form rules, bundle, hostile markdown, shell
-docs/DECISIONS.md       why each decision was made (D1–D31)
+docs/DECISIONS.md       why each decision was made (D1–D32)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -401,14 +420,14 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 264 tests (1 skipped without symlink rights), ~50s
+.\.venv\Scripts\python -m pytest          # 270 tests (1 skipped without symlink rights), ~50s
 ```
 
 ```powershell
 cd desktop; npm test                       # 41 tests: stream client, form/settings rules, production
                                            # bundle has no mock model, hostile markdown,
                                            # shell vs a real backend
-npm run smoke                              # real Electron: 50 steps, exits 0/1
+npm run smoke                              # real Electron: 58 steps, exits 0/1
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -460,7 +479,7 @@ data in prompts.
   `workspace/<project>/`, the tester's command run in a sandbox (allowlist,
   timeout, truncated capture), test failures feeding the fix loop, `run`
   command for zero-cost re-runs, 138 tests.
-- **Phase 4 (in progress)** — FastAPI backend + React/Vite + Electron desktop UI.
+- **Phase 4 (done)** — FastAPI backend + React/Vite + Electron desktop UI.
   **Part A (the API) is done.** Step 1 done: loopback-bound API with
   per-launch token, Host/Origin checks,
   request-size cap and SQLite-backed event replay (`data/app.db`, D17/D18).
@@ -469,7 +488,7 @@ data in prompts.
   Step 5 done: SSE event stream with cursor resume (D19, D23).
   Step 6 done: end-to-end tests over a real server, security pass, pinned
   API surface (D24).
-  **Part B (the desktop UI) is in progress.** B1 done: app shell, backend
+  **Part B (the desktop UI) is done.** B1 done: app shell, backend
   launch with the token over stdin and `SDA_READY`, `sda://app` serving,
   locked-down renderer with CSP, health in the window (D25–D27). B2 done:
   New run form (execution gate on by default), live stage timeline and event
@@ -479,7 +498,10 @@ data in prompts.
   read-only file viewer, two sandboxed read-only file routes (D30). B5 done:
   Settings screen (first-choice model per agent, provider order, write-only
   keys, ignored-settings warning), and a fix for an approval-dialog race
-  (D31). Next: B6.
+  (D31). B6 done: run history across restarts (runs saved in `app.db`,
+  interrupted runs recovered), Cancel run in the approval dialog, and a
+  window title that flags a waiting approval (D32). Deferred: packaging
+  (bundling Python, an installer).
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

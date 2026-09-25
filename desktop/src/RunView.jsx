@@ -57,6 +57,13 @@ export default function RunView({ client, runId }) {
   const finished = run ? TERMINAL.has(run.status) : false;
   const waits = events.filter((e) => e.kind === "api.run_waiting_approval").length;
   const waiting = run?.status === "waiting_approval" && run.gate && !run.gate.decision;
+
+  // A run waiting for a human says so in the window title (taskbar, alt-tab).
+  useEffect(() => {
+    const base = "Senior Developer Agents";
+    document.title = waiting ? `Approval needed (${run.gate.gate}) · ${base}` : base;
+    return () => { document.title = base; };
+  }, [waiting, run?.gate?.gate]);
   const closed = events.some((e) => CLOSING_KINDS.has(e.kind));
 
   async function cancel() {

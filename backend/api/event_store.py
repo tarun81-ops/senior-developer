@@ -64,7 +64,12 @@ class EventStore:
         # same run (the worker and a cancel request) must never make seq N+1
         # visible before N, or a streaming reader would skip N for good.
         with self._condition:
-            seq = self._seqs.get(event.run_id, -1) + 1
+            if event.run_id not in self._seqs:
+                # A run from an earlier launch continues after its saved
+                # events; restarting at 0 would collide, and INSERT OR IGNORE
+                # would drop the new event silently (D32).
+                self._seqs[event.run_id] = self.repository.last_seq(event.run_id)
+            seq = self._seqs[event.run_id] + 1
             self._seqs[event.run_id] = seq
             self.repository.append(event, seq=seq)
             self._condition.notify_all()
@@ -78,6 +83,12 @@ class EventStore:
 
     def last_seq(self, run_id: str) -> int:
         return self.repository.last_seq(run_id)
+
+    def save_run(self, run_id: str, created_at: str, record: dict) -> None:
+        self.repository.save_run(run_id, created_at, record)
+
+    def load_runs(self, *, limit: int) -> list[dict]:
+        return self.repository.load_runs(limit=limit)
 
     def run_ids(self, *, limit: int = 100) -> list[str]:
         return self.repository.run_ids(limit=limit)

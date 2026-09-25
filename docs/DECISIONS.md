@@ -803,6 +803,68 @@ agent uses.
 
 ---
 
+## D32 — Run history: a snapshot per run in app.db, saved on every run event (Phase 4, Part B)
+
+**Decision:**
+
+* **Storage.** Runs are saved in a `runs` table in `data/app.db`, next to
+  `events` and behind the same repository (D18: `save_run`, `load_runs`).
+  Each row is the run's snapshot as JSON:
+  * request, project, options, status, timestamps, error/ok/reason, calls
+    and tokens;
+  * board and project-folder paths;
+  * the pipeline result and the last gate.
+
+  The cancel flag and the gate's wake-up event are live process state and
+  are never saved. No key is ever in a run.
+* **When it is saved.** Every state change of a run already emits an API
+  event under the manager lock (queued, started, waiting, approved/rejected,
+  cancel requested, and the closing event, D23). `_emit` saves the snapshot
+  right there, so there is no save call to forget at each transition. The
+  snapshot is also saved when the run's paths become known.
+* **Loading.** On startup the manager loads the newest 200 runs.
+  * An unreadable row is skipped with a warning; it never blocks startup.
+  * A run saved as not finished belonged to a process that stopped without
+    shutting down. It cannot resume, so it is finished as `failed` with
+    reason `interrupted`. That goes through the normal path, so it gets its
+    closing event and a stream on it closes.
+* **Event numbering (latent bug fixed).** `EventStore` numbered each run's
+  events from memory, starting at 0 in a new process. A later event for a
+  run from an earlier launch would have reused `seq 0`, and
+  `INSERT OR IGNORE` would have dropped it silently. The store now continues
+  from the database's last `seq` the first time it sees a run. A mutation
+  check confirmed the tests fail without this.
+* **UI.**
+  * A runs list shows every run newest first and reopens any of them; the
+    log is replayed through the same stream (D23).
+  * It re-reads the list when a run is created or selected, and every 2 s
+    only while some run is still active.
+  * The approval dialog has its own **Cancel run** (a modal makes the page
+    behind it inert).
+  * The window title says "Approval needed (<gate>)" while a run waits.
+* **Tests.**
+  * pytest: runs and their details, board, files and stream survive a
+    restart, and a finished run refuses a decision (`409`). A crashed run
+    comes back interrupted, with its closing event numbered after the saved
+    events, and stays that way on the next launch. An unreadable row is
+    skipped. Numbering continues in a new process, and live state is never
+    saved.
+  * Smoke: the list shows every run newest first with the right statuses,
+    an earlier run reopens with its replayed log, **Cancel run** works from
+    inside the dialog, and the title flags the waiting gate and then resets.
+
+**Why:** a run is the user's work, and it should not vanish because the app
+restarted. Saving at the one place every transition already passes through
+is the least code that cannot miss a state. Treating an unfinished saved run
+as interrupted is the honest outcome: nothing can resume a pipeline whose
+process is gone.
+
+**Cost accepted:** only the newest 200 runs are loaded (older rows stay in
+`app.db`). There is no search, delete or resume. The list polls while a run
+is active instead of sharing the run's stream.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -811,6 +873,6 @@ agent uses.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B5 done, B6 next) |
+| 4 | FastAPI backend + Electron/React desktop UI | done (Part A, the API; Part B, B1–B6). Packaging deferred |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

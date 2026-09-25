@@ -158,6 +158,34 @@ class RunRecord:
     #: run never asked for approval (D21)
     gate: GateState | None = None
 
+    #: Fields saved to app.db (D32). The cancel flag and the gate's wake-up
+    #: event are live process state and are never saved.
+    _SAVED = (
+        "run_id", "request", "project", "status", "created_at", "started_at",
+        "finished_at", "error", "ok", "reason", "calls", "tokens",
+        "board_path", "project_dir",
+    )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Everything needed to show this run after a restart, as plain JSON."""
+        data = {name: getattr(self, name) for name in self._SAVED}
+        data["options"] = self.options.model_dump()
+        data["result"] = self.result.to_dict() if self.result is not None else None
+        data["gate"] = self.gate.to_dict() if self.gate is not None else None
+        return data
+
+    @classmethod
+    def restore(cls, data: dict[str, Any]) -> RunRecord:
+        """A record from :meth:`snapshot`, as it was when last saved."""
+        gate = data.get("gate")
+        result = data.get("result")
+        return cls(
+            **{name: data[name] for name in cls._SAVED if name in data},
+            options=RunOptions.model_validate(data["options"]),
+            result=PipelineResult(**result) if result else None,
+            gate=GateState(**gate) if gate else None,
+        )
+
     @property
     def stages(self) -> list[str]:
         return list(self.options.stages)
@@ -247,6 +275,41 @@ class RunManager:
         )
         self._closed = False
         self._default_stages: list[str] | None = None
+        self._load_history()
+
+    # -- history (D32) ---------------------------------------------------------
+    def _load_history(self) -> None:
+        """Bring back the runs saved by earlier launches, newest last.
+
+        A saved run that was not finished belonged to a process that stopped
+        without shutting down (a crash, a killed window). Nothing can resume
+        it, so it is finished here as ``failed`` with reason ``interrupted``,
+        which also writes its closing event, so a stream on it closes.
+        """
+        try:
+            saved = self.event_store.load_runs(limit=MAX_TRACKED_RUNS)
+        except Exception:  # noqa: BLE001 - history must never stop the API starting
+            logger.warning("could not load run history", exc_info=True)
+            return
+        with self._lock:
+            for data in saved:
+                try:
+                    record = RunRecord.restore(data)
+                except Exception:  # noqa: BLE001 - skip one bad row, keep the rest
+                    logger.warning("skipping unreadable saved run %r", data.get("run_id"))
+                    continue
+                self._runs[record.run_id] = record
+                self._order.append(record.run_id)
+            for run_id in self._order:
+                record = self._runs[run_id]
+                if not record.is_terminal:
+                    self._finish_locked(
+                        record,
+                        "failed",
+                        ok=False,
+                        reason="interrupted",
+                        error="Interrupted: the app stopped while this run was active.",
+                    )
 
     # -- runtime construction ------------------------------------------------
     def _default_runtime(self, run_id: str) -> Runtime:
@@ -649,6 +712,7 @@ class RunManager:
                 record.project_dir = str(
                     runtime.settings.workspace_dir / slugify(record.project)
                 )
+                self._save(record)
             self._apply_result(record, pipeline.run(record.request))
         except RunCancelled as exc:
             self._finish(record, "cancelled", error=str(exc), reason="cancelled")
@@ -784,6 +848,18 @@ class RunManager:
             )
         except Exception:  # noqa: BLE001 - an event write must never fail a run
             logger.warning("could not persist %s event", kind, exc_info=True)
+        # Every state change of a run emits an API event, so saving here keeps
+        # app.db's copy of the run current without a save at each call site.
+        record = self._runs.get(run_id)
+        if record is not None:
+            self._save(record)
+
+    def _save(self, record: RunRecord) -> None:
+        """Write the run's snapshot to app.db (D32). Never fails a run."""
+        try:
+            self.event_store.save_run(record.run_id, record.created_at, record.snapshot())
+        except Exception:  # noqa: BLE001 - history is a convenience, not the run
+            logger.warning("could not save run %s", record.run_id, exc_info=True)
 
     # -- shutdown ------------------------------------------------------------
     def shutdown(self, *, wait: bool = True, timeout: float = 5.0) -> None:

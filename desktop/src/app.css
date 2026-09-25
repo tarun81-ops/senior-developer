@@ -88,3 +88,12 @@ table.agents select { font: inherit; max-width: 320px; }
 .key-row input { font: inherit; padding: 4px; }
 .key-status[data-status="set"] { color: #1b5e20; }
 .key-status[data-status="missing"] { color: #b3261e; }
+.side { display: grid; gap: 16px; align-content: start; }
+.runs-list ul { list-style: none; padding: 0; margin: 0; max-height: 50vh; overflow: auto; }
+.run-item { display: grid; gap: 2px; width: 100%; text-align: left; background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px; font: inherit; cursor: pointer; }
+.run-item:hover { background: #f6f6f6; }
+.run-item[aria-current="true"] { border-color: #bbb; background: #f2f6ff; }
+.run-item-request { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-item-meta { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.actions .spacer { flex: 1; }
+button.cancel-run { color: #b3261e; }

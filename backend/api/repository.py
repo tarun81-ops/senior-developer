@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_events_run_ts ON events (run_id, ts);
+CREATE TABLE IF NOT EXISTS runs (
+    run_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    record_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runs_created ON runs (created_at);
 """
 
 
@@ -101,6 +107,11 @@ class EventRepository(Protocol):
     def append(self, event: Event, *, seq: int) -> None:
         """Persist one event under the given per-run sequence number."""
 
+    def save_run(self, run_id: str, created_at: str, record: dict[str, Any]) -> None:
+        """Insert or replace one run's latest snapshot (D32)."""
+
+    def load_runs(self, *, limit: int) -> list[dict[str, Any]]:
+        """The newest ``limit`` run snapshots, oldest first."""
 
 
 class SqliteEventRepository:
@@ -240,6 +251,26 @@ class SqliteEventRepository:
                 (limit,),
             ).fetchall()
         return [row["run_id"] for row in rows]
+
+    # -- runs (D32) ------------------------------------------------------------
+    def save_run(self, run_id: str, created_at: str, record: dict[str, Any]) -> None:
+        """Insert or replace one run's latest snapshot. Keys are never in it."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO runs (run_id, created_at, record_json) VALUES (?, ?, ?)",
+                (run_id, created_at, json.dumps(record, default=str)),
+            )
+
+    def load_runs(self, *, limit: int) -> list[dict[str, Any]]:
+        """The newest ``limit`` run snapshots, oldest first (the order runs were made)."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT record_json FROM runs ORDER BY created_at DESC, run_id DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [json.loads(row["record_json"]) for row in reversed(rows)]
 
     def close(self) -> None:
         """No pooled connections are held, so this is a no-op kept for the protocol."""

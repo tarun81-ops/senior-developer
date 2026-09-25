@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { createClient } from "./api.js";
 import NewRunForm from "./NewRunForm.jsx";
+import RunsList from "./RunsList.jsx";
 import RunView from "./RunView.jsx";
 import SettingsView from "./SettingsView.jsx";
 
@@ -18,6 +19,7 @@ export default function App() {
   const [client, setClient] = useState(null);
   const [screen, setScreen] = useState("runs");
   const [runId, setRunId] = useState(null);
+  const [created, setCreated] = useState(0); // bumps the runs list after a new run
   // Settings warnings (e.g. an ignored overrides file) flag the nav from
   // startup, not only once the Settings screen is opened (D31).
   const [warnings, setWarnings] = useState([]);
@@ -54,8 +56,15 @@ export default function App() {
       {status.state === "error" && <p className="error">{status.text}</p>}
       {client && screen === "runs" && (
         <div className="layout">
-          <NewRunForm client={client} onCreated={setRunId} />
-          {runId ? <RunView key={runId} client={client} runId={runId} /> : <p className="muted">Start a run to follow it here.</p>}
+          <div className="side">
+            <NewRunForm client={client} onCreated={(id) => { setRunId(id); setCreated((n) => n + 1); }} />
+            <RunsList client={client} selected={runId} onSelect={setRunId} refreshKey={created} />
+          </div>
+          {runId ? (
+            <RunView key={runId} client={client} runId={runId} />
+          ) : (
+            <p className="muted">Start a run, or choose one from the list to see it here.</p>
+          )}
         </div>
       )}
       {client && screen === "settings" && <SettingsView client={client} onWarnings={setWarnings} />}

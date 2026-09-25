@@ -18,7 +18,7 @@ const TITLES = {
 export default function ApprovalDialog({ client, run, open, onClose }) {
   const dialog = useRef(null);
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(null); // "approve" | "reject" | null
+  const [busy, setBusy] = useState(null); // "approve" | "reject" | "cancel" | null
   const [error, setError] = useState(null);
   const gate = run.gate;
 
@@ -32,7 +32,8 @@ export default function ApprovalDialog({ client, run, open, onClose }) {
     setBusy(action);
     setError(null);
     try {
-      await client[action](run.run_id, note.trim() || undefined);
+      if (action === "cancel") await client.cancel(run.run_id);
+      else await client[action](run.run_id, note.trim() || undefined);
       setNote("");
       onClose();
     } catch (err) {
@@ -62,6 +63,12 @@ export default function ApprovalDialog({ client, run, open, onClose }) {
       </label>
       {error && <p className="error">{error}</p>}
       <div className="actions">
+        {/* The page behind a modal dialog cannot be clicked, so cancelling the
+            run has to be possible from here too. */}
+        <button type="button" className="cancel-run" onClick={() => decide("cancel")} disabled={busy !== null}>
+          {busy === "cancel" ? "Cancelling…" : "Cancel run"}
+        </button>
+        <span className="spacer" />
         <button type="button" onClick={onClose} disabled={busy !== null}>Decide later</button>
         <button type="button" className="reject" onClick={() => decide("reject")} disabled={busy !== null}>
           {busy === "reject" ? "Rejecting…" : "Reject"}
