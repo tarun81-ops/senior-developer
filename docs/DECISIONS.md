@@ -596,6 +596,45 @@ by hand.
 
 ---
 
+## D28 — Run screen: events from the stream, state re-read on change; dev-only proven by the build (Phase 4, Part B)
+
+**Decision:**
+
+* **Screen data.** The run screen has two data sources with one job each. The
+  SSE stream (read with the `fetch()` client of D19/D23) provides the event
+  log. The stage timeline and status come from `GET /api/runs/{id}`, re-read
+  whenever a `stage.*`, `pipeline.*` or `api.run_*` event arrives and once
+  more when the stream closes. Only the newest response is applied, so two
+  overlapping reads can never put an older state back on screen.
+* **New-run rules.** They live in a plain module, `src/runRequest.js`, so they
+  are unit-tested without a DOM. `freshForm()` returns a new object with only
+  the execution gate ticked, and the form resets to it after every submit.
+* **Mock model.** The development-only menu (D27 rule 2) is its own module,
+  rendered only under `import.meta.env.DEV`, so a production build drops it
+  along with the mock model's name. A test builds both bundles. The
+  production one must not contain the mock model's name or the menu's text,
+  and the development one must contain both, so the check can't pass
+  vacuously.
+* **Smoke build.** `npm run smoke` builds in development mode, because the
+  offline mock model it drives is only reachable from that menu. `npm start`
+  always rebuilds for production.
+* **Stage selection.** Not in the form; runs use the configured stages.
+
+**Why:**
+* Events are append-only and cheap, and the run state is already assembled
+  by the API. Re-reading it on the few events that change it is simpler, and
+  cannot drift, compared with rebuilding the board from events in the UI.
+* "Mock only in development" is a promise about what ships, so it is checked
+  on the shipped artifact rather than on the source.
+
+**Cost accepted:**
+* One extra GET per state-changing event, a few dozen per run on loopback.
+* The smoke test exercises a development bundle. The production bundle's
+  security is the same, because the CSP and bridge come from the main
+  process, and its content is checked by the build test.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -604,6 +643,6 @@ by hand.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1 shell done, B2 next) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, the API, done; Part B: B1–B2 done, B3 next) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

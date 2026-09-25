@@ -236,8 +236,8 @@ phases, each ending with something you can run:
 | Phase | What you get | Status |
 |---|---|---|
 | B1 | App shell: backend launch, token handoff, `sda://app` serving, health shown in the window | **done** |
-| B2 | Create a run + live event timeline | next |
-| B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | |
+| B2 | Create a run + live event timeline | **done** |
+| B3 | Approval dialogs (plan/architecture as sanitized markdown, execution shows the exact command/cwd/timeout) | next |
 | B4 | Task board + read-only file viewer | |
 | B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | |
 | B6 | Run history + polish | |
@@ -252,9 +252,27 @@ cd desktop; npm install
 ```powershell
 npm start          # build the UI and open the app
 npm run dev        # development: Vite hot reload + Electron
-npm test           # shell tests against a real backend (offline)
-npm run smoke      # real Electron: checks origin, no Node, bridge, CSP; exits 0/1
+npm test           # client, form rules, bundle check, shell vs a real backend (offline)
+npm run smoke      # real Electron: security checks, then drives two offline mock
+                   # runs through the UI (one to success, one cancelled at a gate)
 ```
+
+What B2 gives you:
+
+- **Starting a run.** The **New run** form takes a request, an optional
+  project folder name, and which gates to stop at. The execution gate starts
+  ticked on every new form (D27).
+- **Following it live.** The run appears next to the form with its status, a
+  stage timeline (planner through docs) and a live event log. The log is read
+  from the stream with `fetch()`, and it resumes from the last event after a
+  dropped connection.
+- **Gates and cancel.** A run that reaches a gate says which one it is
+  waiting at; the approval dialogs are B3. **Cancel run** works at any point
+  before the run finishes.
+- **Developer menu.** In development builds (`npm run dev`) a **Developer**
+  menu offers the offline mock model, so you can try runs without spending
+  quota. Production builds (`npm start`) don't contain it, and a test builds
+  the production bundle to prove that.
 
 How it fits together (D25, D26):
 
@@ -311,9 +329,13 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
   electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
   electron/preload.cjs  the page's only bridge: connection() -> { baseUrl, token }
-  src/                  React UI (B1: connection + health)
-  test/                 node --test against a real backend
-docs/DECISIONS.md       why each decision was made (D1–D27)
+  electron/smoke-page.js  what `npm run smoke` does inside the real page
+  src/api.js            API client + fetch()-based SSE reader (resume, backoff, dedupe)
+  src/runRequest.js     new-run defaults (execution gate on) and request body
+  src/NewRunForm.jsx    the New run form; DevMenu.jsx is development-only
+  src/RunView.jsx       status, stage timeline, live event log, cancel
+  test/                 node --test: client, form rules, bundle, shell vs a real backend
+docs/DECISIONS.md       why each decision was made (D1–D28)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -328,8 +350,9 @@ workspace/              where generated apps will live — git-ignored
 ```
 
 ```powershell
-cd desktop; npm test                       # 7 tests: shell launch against a real backend
-npm run smoke                              # real Electron window checks, exits 0/1
+cd desktop; npm test                       # 16 tests: stream client, form rules, production
+                                           # bundle has no mock model, shell vs a real backend
+npm run smoke                              # real Electron: 16 steps, exits 0/1
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -392,7 +415,9 @@ data in prompts.
   API surface (D24).
   **Part B (the desktop UI) is in progress.** B1 done: app shell, backend
   launch with the token over stdin and `SDA_READY`, `sda://app` serving,
-  locked-down renderer with CSP, health in the window (D25–D27). Next: B2.
+  locked-down renderer with CSP, health in the window (D25–D27). B2 done:
+  New run form (execution gate on by default), live stage timeline and event
+  log, cancel, development-only mock model (D28). Next: B3.
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

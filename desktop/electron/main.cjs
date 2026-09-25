@@ -78,7 +78,7 @@ function createWindow() {
     width: 1200,
     height: 800,
     title: "Senior Developer Agents",
-    show: !SMOKE,
+    show: !SMOKE || Boolean(process.env.SDA_SMOKE_SCREENSHOT), // hidden windows stop painting
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -110,47 +110,31 @@ ipcMain.handle("sda:connection", (event) => {
 /** A throwaway project root for --smoke, so it never touches data/ or workspace/. */
 function smokeRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sda-smoke-"));
-  fs.cpSync(path.join(REPO_ROOT, "config"), path.join(root, "config"), { recursive: true });
+  for (const dir of ["config", "backend/core/agents/prompts"]) {
+    fs.cpSync(path.join(REPO_ROOT, dir), path.join(root, dir), { recursive: true });
+  }
   return root;
 }
 
 /**
- * --smoke: load the built UI from sda://app and check, inside the real page,
- * that it connected, has no Node, sees a bridge of exactly one function, and
- * is held to the CSP. Exits 0 or 1.
+ * --smoke: run electron/smoke-page.js inside the real page. It checks the
+ * security posture (D26) and drives the UI like a person on the offline mock
+ * model. Prints each step; exits 0 only if all pass.
  */
 async function smoke(win) {
   await new Promise((resolve) => win.webContents.once("did-finish-load", resolve));
-  const report = await win.webContents.executeJavaScript(`
-    new Promise((resolve) => {
-      const started = Date.now();
-      (function check() {
-        const el = document.querySelector("[data-connection]");
-        const state = el && el.dataset.connection;
-        if (state !== "ok" && state !== "error" && Date.now() - started < 20000) {
-          return setTimeout(check, 100);
-        }
-        // A request to any other origin must be stopped by the CSP before it
-        // leaves the page (port 1 on loopback: nothing real is contacted).
-        let violated = null;
-        document.addEventListener("securitypolicyviolation", (e) => { violated = e.violatedDirective; });
-        fetch("http://127.0.0.1:1/").catch(() => {}).finally(() => setTimeout(() => resolve({
-          state,
-          text: el && el.textContent,
-          origin: location.origin,
-          node: typeof require !== "undefined" || typeof process !== "undefined",
-          bridge: Object.keys(window.sda || {}),
-          cspBlockedOtherOrigin: violated,
-        }), 100));
-      })();
-    })`);
-  console.log("smoke:", JSON.stringify(report));
-  const ok = report.state === "ok"
-    && report.origin === APP_ORIGIN
-    && report.node === false
-    && JSON.stringify(report.bridge) === '["connection"]'
-    && report.cspBlockedOtherOrigin === "connect-src";
-  return ok ? 0 : 1;
+  const script = fs.readFileSync(path.join(__dirname, "smoke-page.js"), "utf8");
+  const report = await win.webContents.executeJavaScript(script);
+  for (const s of report.steps) {
+    console.log(`smoke: ${s.ok ? "ok  " : "FAIL"} ${s.name}${s.detail === undefined ? "" : ` (${JSON.stringify(s.detail)})`}`);
+  }
+  if (report.error) console.log(`smoke: FAIL ${report.error}`);
+  if (process.env.SDA_SMOKE_SCREENSHOT) {
+    // for reviewing the screen as the smoke left it
+    fs.writeFileSync(process.env.SDA_SMOKE_SCREENSHOT, (await win.webContents.capturePage()).toPNG());
+  }
+  console.log(`smoke: ${report.ok ? "PASSED" : "FAILED"}`);
+  return report.ok ? 0 : 1;
 }
 
 app.whenReady().then(async () => {

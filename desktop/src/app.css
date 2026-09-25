@@ -7,3 +7,33 @@ body { margin: 0; font-family: system-ui, sans-serif; }
 .status[data-connection="ok"] { background: #d9f5df; }
 .status[data-connection="error"] { background: #fde2e1; }
 .error { color: #b3261e; white-space: pre-wrap; }
+.layout { display: grid; grid-template-columns: minmax(260px, 1fr) 2fr; gap: 16px; align-items: start; margin-top: 12px; }
+@media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+.card h2 { font-size: 16px; margin: 0 0 8px; }
+.field { display: grid; gap: 4px; margin-bottom: 8px; }
+.field textarea, .field input { font: inherit; padding: 6px; }
+fieldset { border: 1px solid #eee; margin: 0 0 8px; }
+.check { display: block; }
+.muted { color: #666; }
+.notice { background: #fff7e0; border-radius: 6px; padding: 8px; }
+.dev-menu { margin: 8px 0; padding: 6px; border: 1px dashed #c77; border-radius: 6px; }
+button { font: inherit; padding: 4px 12px; }
+.run-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.run-head h2 { flex: 1; margin: 0; overflow-wrap: anywhere; }
+.status-pill { padding: 2px 10px; border-radius: 999px; background: #eee; }
+.status-pill[data-status="succeeded"] { background: #d9f5df; }
+.status-pill[data-status="failed"], .status-pill[data-status="cancelled"] { background: #fde2e1; }
+.status-pill[data-status="waiting_approval"] { background: #fff0c2; }
+.timeline { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; }
+.timeline li { border: 1px solid #ddd; border-radius: 6px; padding: 4px 8px; display: grid; }
+.timeline li[data-status="running"] { border-color: #3b82f6; }
+.timeline li[data-status="done"] { background: #eefaf0; }
+.timeline li[data-status="failed"] { background: #fdeeee; }
+.stage-name { font-weight: 600; }
+.stage-status { font-size: 12px; color: #555; }
+.events { max-height: 420px; overflow: auto; font-size: 13px; }
+.events table { border-collapse: collapse; width: 100%; }
+.events td { padding: 2px 6px; vertical-align: top; border-bottom: 1px solid #f2f2f2; }
+.events td:last-child { overflow-wrap: anywhere; }
+.events td:nth-child(-n+3) { white-space: nowrap; }

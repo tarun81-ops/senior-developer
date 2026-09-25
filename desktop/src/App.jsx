@@ -1,25 +1,30 @@
-// B1: the app shell. Gets { baseUrl, token } from the bridge, calls the
-// token-guarded health endpoint, and shows the result. Screens start in B2.
+// The app shell: connect over the bridge (D26), check health, then the B2
+// screen: a new-run form and the selected run, live.
 import { useEffect, useState } from "react";
+
+import { createClient } from "./api.js";
+import NewRunForm from "./NewRunForm.jsx";
+import RunView from "./RunView.jsx";
 
 async function connect() {
   if (!window.sda) throw new Error("Open this app through the desktop shell (npm start or npm run dev).");
-  const { baseUrl, token } = await window.sda.connection();
-  const response = await fetch(`${baseUrl}/api/health`, { headers: { "X-API-Key": token } });
-  if (!response.ok) throw new Error(`Health check failed: HTTP ${response.status}`);
-  return response.json();
+  const client = createClient(await window.sda.connection());
+  return { client, health: await client.health() };
 }
 
 export default function App() {
   const [status, setStatus] = useState({ state: "connecting", text: "Connecting to the local API…" });
+  const [client, setClient] = useState(null);
+  const [runId, setRunId] = useState(null);
 
   useEffect(() => {
     let live = true;
     connect()
-      .then((health) => live && setStatus({
-        state: "ok",
-        text: `Connected: API ${health.version} on port ${health.api_port}`,
-      }))
+      .then(({ client: api, health }) => {
+        if (!live) return;
+        setClient(api);
+        setStatus({ state: "ok", text: `Connected: API ${health.version} on port ${health.api_port}` });
+      })
       .catch((err) => live && setStatus({ state: "error", text: String(err.message || err) }));
     return () => { live = false; };
   }, []);
@@ -31,6 +36,12 @@ export default function App() {
         <span className="status" data-connection={status.state}>{status.state === "ok" ? status.text : status.state}</span>
       </header>
       {status.state === "error" && <p className="error">{status.text}</p>}
+      {client && (
+        <div className="layout">
+          <NewRunForm client={client} onCreated={setRunId} />
+          {runId ? <RunView key={runId} client={client} runId={runId} /> : <p className="muted">Start a run to follow it here.</p>}
+        </div>
+      )}
     </main>
   );
 }

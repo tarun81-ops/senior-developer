@@ -9,7 +9,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "vite build",
     "start": "vite build && electron .",
-    "smoke": "vite build && electron . --smoke",
+    "smoke": "node scripts/smoke.mjs",
     "test": "node --test \"test/*.test.js\""
   },
   "devDependencies": {
