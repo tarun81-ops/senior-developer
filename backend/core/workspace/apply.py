@@ -17,10 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from backend.core.orchestrator.board import DONE, TaskBoard
 from backend.core.workspace.sandbox import UnsafePath, Workspace, safe_relative_path
+
+if TYPE_CHECKING:  # annotations only; see collect_entries for the runtime import
+    from backend.core.orchestrator.board import TaskBoard
 
 #: Stages whose JSON output may contain a `files` manifest, in priority order.
 FILE_STAGES: tuple[str, ...] = ("coder", "tester", "devops", "docs")
@@ -133,6 +135,11 @@ def collect_entries(
     board: TaskBoard, stages: Iterable[str] = FILE_STAGES
 ) -> list[tuple[str, dict[str, Any]]]:
     """Every ``(stage, file_entry)`` a board produced, in application order."""
+    # Imported here, not at module level: backend.core.orchestrator imports
+    # this package, so a top-level import made `import backend.core.workspace`
+    # fail whenever it came first (same pattern as runner.test_command_for).
+    from backend.core.orchestrator.board import DONE
+
     entries: list[tuple[str, dict[str, Any]]] = []
     for stage in stages:
         record = board.records.get(stage)

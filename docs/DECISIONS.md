@@ -1028,6 +1028,46 @@ amendment), and a project with no tests can't be deployed until it has some.
 
 ---
 
+## D36 — Phase 5 scope: GitHub Pages, repo visibility by kind, static and Python first
+
+**Decision** (answers to the revised Phase 5 plan):
+
+1. **Static frontends go to GitHub Pages**, not Vercel. GitHub is already
+   required for Render (D11 amendment), so the whole feature needs two
+   accounts, GitHub and Render, instead of three.
+2. **Repo visibility follows the kind.** Static sites get a **public** repo:
+   free GitHub Pages requires it, and the site is public anyway. Backends get
+   a **private** repo, since Render deploys private repos and the source
+   doesn't need to be published.
+3. **Static sites and Python backends first.** Detection (P5.1,
+   `backend/core/deploy/detect.py`) accepts:
+   * a plain `index.html` site, published as-is;
+   * a Vite app, built by the Pages workflow with a relative `--base=./`, so
+     it works under `/<repo>/` whatever the repo is called;
+   * exactly one FastAPI or Flask `app` whose framework is in the project's
+     requirements. Render runs it with `uvicorn`/`gunicorn` on `$PORT`, and
+     that server is installed explicitly, because generated requirements
+     often omit it.
+
+   Full-stack projects, Node servers, several apps, an app without
+   requirements, and anything unrecognized are **refused with a reason**.
+   They are later steps.
+* **Names.** Each workspace folder's stable name is `sda-<folder>`, used for
+  its repo and its Render service (D35).
+* **Eligibility.** `deploy_refusal` implements D35: only `succeeded` runs
+  whose tests ran and passed. Dry runs, `no_apply`, `no_run_tests`, runs with
+  no test, and failed, timed-out, cancelled or interrupted runs are refused,
+  each with its own reason.
+
+**Why:** the fewest accounts and tokens that meet D11's "target by need", and
+refusal instead of guessing, because a wrong guess publishes something broken
+under the user's name.
+
+**Cost accepted:** Vite apps with client-side routing may need a 404 fallback
+on Pages, and a project that fits none of the kinds can't deploy yet.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |

@@ -353,3 +353,25 @@ def test_test_command_detects_node_projects(tmp_path: Path) -> None:
     assert detect_test_command(tmp_path) == "npm test --silent"
 
 
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["backend.core.workspace", "backend.core.orchestrator", "backend.core.deploy"],
+)
+def test_each_package_imports_first_in_a_fresh_interpreter(module: str) -> None:
+    """Regression: `import backend.core.workspace` used to fail on its own.
+
+    workspace/apply.py imported the orchestrator package at module level, and
+    the orchestrator imports workspace back. It only worked when something
+    else had imported the orchestrator first.
+    """
+    import subprocess
+
+    from backend.core.config import PACKAGE_ROOT
+
+    done = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        cwd=PACKAGE_ROOT, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    assert done.returncode == 0, done.stderr
