@@ -1,0 +1,15 @@
+# What the installed app's bundled Python needs (desktop/scripts/bundle-backend.mjs).
+# Phase 1: HTTP, validation, YAML, timezones.
+httpx>=0.27,<1.0
+pydantic>=2.7,<3.0
+PyYAML>=6.0
+python-dotenv>=1.0
+tzdata>=2024.1
+
+# Phase 4: the local API for the desktop UI. SQLite ships with Python.
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+
+# Generated projects' Python tests run in this same interpreter (runner.py
+# rewrites `python` to sys.executable), so pytest ships with the app too.
+pytest>=8.0

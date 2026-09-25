@@ -10,7 +10,8 @@
     "build": "vite build",
     "start": "vite build && electron .",
     "smoke": "node scripts/smoke.mjs",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "bundle": "node scripts/bundle-backend.mjs"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.1",

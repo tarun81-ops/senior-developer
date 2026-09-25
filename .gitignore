@@ -27,6 +27,7 @@ node_modules/
 desktop/dist/
 desktop/out/
 desktop/release/
+desktop/build/
 *.log
 
 # --- Editors / OS ---
