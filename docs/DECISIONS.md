@@ -132,6 +132,22 @@ support. Note the constraint this creates: the deployed backend cannot run
 `npm` on the user's machine, so deployment targets the *generated app*, while
 heavy agent runs happen locally.
 
+**Amended (Phase 5 planning):** there is no single default target. The target
+is chosen by what each generated app needs (D35):
+
+* a **static frontend** (e.g. a Vite build) goes to **Vercel or GitHub
+  Pages**;
+* an app with a **long-running backend** (always-on processes, streaming such
+  as SSE, background work) goes to **Render**, an always-on web service.
+  Serverless platforms break exactly those needs. This system's own backend
+  is an example: it runs long pipelines and streams over SSE. It stays local
+  (see above), and generated apps with the same needs get Render.
+
+Render deploys only from a Git repository or a container image, and GitHub
+Pages serves from a repository. Both Render and GitHub Pages therefore
+require a GitHub account and token, a repository per project, and, for
+Render, a one-time authorization linking Render to GitHub.
+
 ## D12 — Secrets: env file first, keyring second (decision)
 
 **Decision:** keys are read from `.env` (git-ignored) with an optional Windows
@@ -972,6 +988,43 @@ Two of the three bugs were invisible to every earlier test.
 * A generated Python project's own third-party dependencies can't be
   installed into the bundled interpreter (stdlib and `pytest` only).
 * No auto-update: a new version is installed over the old one.
+
+---
+
+## D35 — Deployment policy: target by need, only tested successes, one stable project per folder (Phase 5)
+
+**Decision** (answers given before any Phase 5 code):
+
+1. **Target by need, not by default** (D11 amendment). A deploy step
+   classifies the generated project first:
+   * a static frontend goes to Vercel or GitHub Pages;
+   * a long-running backend goes to Render;
+   * anything it cannot classify is refused, with the reason, rather than
+     guessed.
+2. **Only runs that succeeded with tests passing can be deployed.** A run
+   qualifies only if its status is `succeeded` and a test execution actually
+   ran in it and passed (`tests.ok` is true). These never qualify:
+   * a failed, cancelled or interrupted run;
+   * a run whose tests were skipped (`no_run_tests`, no test command found,
+     execution disabled);
+   * a dry run.
+
+   Deployment is never automatic. It is a separate human action with its own
+   confirmation of exactly what will be published.
+3. **One stable deployment target per workspace folder.** Deploying the same
+   `workspace/<project>/` again updates the same Vercel project, Render
+   service or repository, so its public URL stays the same. There are no
+   one-off deployments.
+
+**Why:** a platform that can't keep a process alive silently breaks apps
+that need one, so the target must follow the app. Publishing is public and
+outward-facing, so only work with evidence behind it (tests that ran and
+passed) may leave the machine, and only when a human confirms it each time.
+Stable targets mean a redeploy fixes the app people already have the link
+to.
+
+**Cost accepted:** Render and GitHub Pages bring a GitHub dependency (D11
+amendment), and a project with no tests can't be deployed until it has some.
 
 ---
 
