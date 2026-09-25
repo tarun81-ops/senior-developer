@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from backend import __version__
+from backend.api import settings_service
 from backend.api.event_store import EventStore
 from backend.api.middleware import BodySizeLimitMiddleware
 from backend.api.models import (
@@ -41,15 +42,19 @@ from backend.api.models import (
     EventResponse,
     EventsPageResponse,
     HealthResponse,
+    KeysUpdateRequest,
     ProjectsListResponse,
     ProjectSummary,
     RunsListResponse,
     RunStateResponse,
+    SettingsResponse,
+    SettingsUpdateRequest,
 )
 from backend.api.repository import SqliteEventRepository
 from backend.api.run_manager import GateNotWaiting, RunManager, RunNotFound, RunOptions
 from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
 from backend.core.config import get_settings, load_env
+from backend.core.errors import ConfigError
 from backend.core.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -306,6 +311,33 @@ def create_app(
             status=manager.get(run_id).status,
             note=state.note,
         )
+
+    # -- settings (Part A, step 4; D22) ---------------------------------------
+    # Read on every request and by every new run, never cached: a PUT takes
+    # effect for the next run, and a run in progress keeps the registry it
+    # started with.
+    @api.get("/settings", response_model=SettingsResponse)
+    def get_settings_route() -> SettingsResponse:
+        try:
+            return settings_service.snapshot(resolved)
+        except ConfigError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @api.put("/settings", response_model=SettingsResponse)
+    def put_settings(body: SettingsUpdateRequest) -> SettingsResponse:
+        """Replace the local overrides. Unknown agent/provider/model is a 422."""
+        try:
+            return settings_service.update_overrides(resolved, body)
+        except ConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @api.put("/settings/keys", response_model=SettingsResponse)
+    def put_keys(body: KeysUpdateRequest) -> SettingsResponse:
+        """Write-only: keys go to ``.env``; the response says only set/missing."""
+        try:
+            return settings_service.update_keys(resolved, body.keys)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # -- projects ------------------------------------------------------------
     @api.get("/projects", response_model=ProjectsListResponse)

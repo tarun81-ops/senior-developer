@@ -365,6 +365,47 @@ and the execution gate re-opens for every command, including fix-loop reruns.
 
 ---
 
+## D22 — Settings: local overrides layered at load time, keys write-only (Phase 4)
+
+**Decision:** implements the settings half of D18. `GET /api/settings` and
+`PUT /api/settings` read and replace two kinds of override: a pinned
+first-choice model per agent and a global `provider_order`. They persist to
+the git-ignored `data/settings.local.yaml`, written atomically (temp file,
+then replace), and `Registry.load` layers them over the tracked
+`config/agents.yaml` every time a registry is built. The tracked YAML is
+never edited. A pin goes to the front of the agent's chain and the rest of the
+configured chain stays behind it as the fallback. `provider_order` only
+reorders the chain slots held by the providers it names, so an unnamed
+provider keeps its place (the `demo` agent's failing first hop, the offline
+mock at the end of every chain). A `PUT` is validated by loading a registry
+with the candidate overrides. An unknown agent, provider or model, a
+provider listed twice, or an unexpected field is a `422`, and nothing is
+written. `{}` clears every override. `PUT /api/settings/keys` writes keys to
+`.env` only (D12), replacing an existing line or appending one. It accepts
+only the key variables the tracked providers declare, and values made of
+characters real keys use. Responses report each expected key as `set` or
+`missing`, and a rejected value is never echoed in the `422`.
+
+**Why:** reading overrides inside `Registry.load` is the one place every
+consumer already passes through. Each API run builds its own runtime (D20),
+so a change reaches the *next* run automatically. A run already in progress
+keeps the registry it started with, and nothing mutates it. The CLI gets the
+same overrides, so the desktop UI and the terminal never disagree about which
+model a stage uses. Pinning instead of replacing the chain keeps free-tier
+failover (D5) intact when the chosen model hits a quota. Key values are
+checked in the route, not by a Pydantic validator, because FastAPI's
+validation error body echoes the submitted input, and that input is the key.
+
+**Cost accepted:** settings are read when a run *starts*, so a run still in
+the queue picks up a change made after it was submitted. A stale overrides
+file, for example one naming a model later removed from `providers.yaml`,
+makes every registry load fail with a message naming the file. Fix it with
+`PUT /api/settings` `{}` or by deleting the file. Keys cannot be cleared
+through the API yet, and a key held only in Windows Credential Manager shows
+as `set` but is not written there.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -373,6 +414,6 @@ and the execution gate re-opens for every command, including fix-loop reruns.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 3 of 6: approval gates) |
+| 4 | FastAPI backend + Electron/React desktop UI | in progress (Part A, step 4 of 6: settings) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.config import Settings, read_yaml
 from backend.core.errors import ConfigError, MissingApiKey
+from backend.core.local_settings import LocalOverrides, apply_overrides, read_overrides
 from backend.core.provider.schemas import ModelSpec, ProviderSpec
 from backend.core.secrets import get_api_key
 
@@ -130,12 +131,24 @@ class Registry:
 
     # -- construction -------------------------------------------------------
     @classmethod
-    def load(cls, settings: Settings) -> Registry:
+    def load(cls, settings: Settings, *, overrides: LocalOverrides | None = None) -> Registry:
+        """Tracked ``config/*.yaml`` with the local overrides layered on top (D22).
+
+        ``overrides=None`` reads them from ``data/settings.local.yaml``; the
+        settings API passes a candidate instead, to validate it before saving.
+        """
         files = settings.config_files
         limits_path = files["limits"]
+        providers_raw = read_yaml(files["providers"])
+        if overrides is None:
+            overrides = read_overrides(settings.local_settings_path)
         return cls.from_dict(
-            providers_raw=read_yaml(files["providers"]),
-            agents_raw=read_yaml(files["agents"]),
+            providers_raw=providers_raw,
+            agents_raw=apply_overrides(
+                read_yaml(files["agents"]),
+                overrides,
+                providers=set(providers_raw.get("providers") or {}),
+            ),
             limits_raw=read_yaml(limits_path) if limits_path.exists() else {},
             root=settings.root,
         )

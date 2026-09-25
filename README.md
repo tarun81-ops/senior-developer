@@ -163,7 +163,8 @@ and update `config/providers.yaml` / `config/agents.yaml` if an id 404s.
 ## Local API (Phase 4 — in progress)
 
 The same pipeline, over HTTP, for the desktop UI. It is built in reviewed steps;
-**step 1 (foundations) is done**, the run/settings/approval endpoints follow.
+**steps 1–4 are done** (foundations, run queue, approval gates, settings);
+SSE streaming follows.
 
 ```powershell
 .\.venv\Scripts\python -m backend.api --port 8765
@@ -185,6 +186,9 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/events?run_id=<run_id>&after_seq=0"
 |---|---|
 | `GET /api/health` | Liveness + the port actually bound. Token required. |
 | `GET /api/events?run_id=&after_seq=` | Replay persisted events (D7 contract, stored in SQLite). |
+| `GET /api/settings` | Effective model chain per agent, providers and their models, provider order, and each expected key as `set` / `missing` (never a value). |
+| `PUT /api/settings` | Replace the local overrides: `{"agents": {"coder": {"provider": "groq", "model": "..."}}, "provider_order": ["groq", "gemini"]}`. Unknown names are `422`. `{}` resets to the tracked defaults. Applies from the next run (D22). |
+| `PUT /api/settings/keys` | Write-only: `{"keys": {"GEMINI_API_KEY": "..."}}` goes to `.env`; the response reports `set` / `missing` only. |
 
 Security is deliberately boring and layered (D17): the server binds
 `127.0.0.1` only, every request must present the per-launch token, the `Host`
@@ -219,8 +223,8 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                156 tests, no network, no keys required
-docs/DECISIONS.md       why each decision was made (D1–D18)
+  tests/                206 tests, no network, no keys required
+docs/DECISIONS.md       why each decision was made (D1–D22)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -231,7 +235,7 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 156 tests, ~9s, offline
+.\.venv\Scripts\python -m pytest          # 206 tests, ~20s, offline
 ```
 
 The suite covers the quota ledger, backoff maths, router failover order, HTTP
@@ -281,7 +285,9 @@ data in prompts.
 - **Phase 4 (in progress)** — FastAPI backend + React/Vite + Electron desktop UI.
   Step 1 done: loopback-bound API with per-launch token, Host/Origin checks,
   request-size cap and SQLite-backed event replay (`data/app.db`, D17/D18).
-  Next: run/settings/approval endpoints, pipeline pause gates, SSE.
+  Steps 2–4 done: FIFO run queue with cancel (D20), approval gates (D21),
+  settings with git-ignored local overrides and write-only keys (D22).
+  Next: SSE event stream (D19).
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 

@@ -66,6 +66,16 @@ class Settings:
             "limits": self.config_dir / "limits.yaml",
         }
 
+    @property
+    def local_settings_path(self) -> Path:
+        """Git-ignored overrides written by the settings API (D22)."""
+        return self.data_dir / "settings.local.yaml"
+
+    @property
+    def env_path(self) -> Path:
+        """Git-ignored ``.env``: the only file API keys are ever written to (D12)."""
+        return self.root / ".env"
+
 
 def load_env(root: Path | str | None = None, *, override: bool = True) -> Path | None:
     """Load ``.env`` into the process environment if it exists.

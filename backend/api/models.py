@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from backend.core.local_settings import AgentPin, LocalOverrides
 from backend.core.orchestrator.pipeline import APPROVAL_GATES, STAGE_SPECS
 
 # -- run lifecycle ------------------------------------------------------------
@@ -433,3 +434,70 @@ class BusyResponse(BaseModel):
     active_run_id: str
 
 
+
+
+# -- settings (Part A, step 4; D22) --------------------------------------------
+#: A key is only ever reported as present or absent, never returned (D12, D18).
+KeyStatus = Literal["set", "missing"]
+
+
+class RouteEntry(BaseModel):
+    """One step of an agent's effective fallback chain."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+
+
+class AgentSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    #: the chain the *next* run will use: tracked config plus local overrides
+    routing: list[RouteEntry]
+    #: the pinned first choice from the local overrides, if any
+    override: AgentPin | None = None
+
+
+class ProviderSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    label: str
+    models: list[str]
+    requires_key: bool
+    api_key_env: str
+
+
+class SettingsResponse(BaseModel):
+    """``GET/PUT /api/settings``: everything a settings screen shows, no secrets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agents: list[AgentSettings]
+    providers: list[ProviderSettings]
+    provider_order: list[str]
+    #: expected key variable -> "set" / "missing"; values are never included
+    keys: dict[str, KeyStatus]
+
+
+class SettingsUpdateRequest(LocalOverrides):
+    """``PUT /api/settings``: replaces the local overrides as a whole.
+
+    An empty body (``{}``) clears every override and restores the tracked
+    defaults.
+    """
+
+
+class KeysUpdateRequest(BaseModel):
+    """``PUT /api/settings/keys``: write-only.
+
+    Names and values are checked in the route, not by a validator here. A
+    validation error from the model would echo the submitted input, which is
+    the key, back in the 422 body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    keys: dict[str, str] = Field(..., min_length=1, max_length=10)
