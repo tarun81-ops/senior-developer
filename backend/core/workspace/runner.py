@@ -175,6 +175,7 @@ def _kill_tree(process: subprocess.Popen) -> None:
         if sys.platform == "win32":
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL,  # see CommandRunner.run: never inherit stdin
                 capture_output=True,
                 check=False,
             )
@@ -235,6 +236,14 @@ class CommandRunner:
             cwd=str(cwd),
             env=env,
             shell=False,
+            # Never inherit our stdin. In the desktop app the API's stdin is the
+            # shell's lifeline pipe, with a thread blocked reading it
+            # (--exit-with-stdin). On Windows, synchronous pipe I/O is
+            # serialised per handle, so a child that inherits it blocks at
+            # startup (its own stdin checks queue behind that read) until the
+            # app quits. It also means a command that waits for input gets EOF
+            # at once instead of hanging until the timeout (D34).
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

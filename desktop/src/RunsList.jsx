@@ -1,10 +1,12 @@
 // Run history (B6, D32): every run the API knows, newest first, including
-// runs from earlier launches. Re-read when a run is created or selected, and
-// every few seconds while any listed run is still active.
+// runs from earlier launches. Re-read when a run is created, every 2 s while
+// any listed run is active, and every 10 s otherwise, so a run started
+// anywhere else (another client, the API directly) still appears (D34).
 import { useEffect, useState } from "react";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
-const POLL_MS = 2000;
+const POLL_ACTIVE_MS = 2000;
+const POLL_IDLE_MS = 10000;
 
 export default function RunsList({ client, selected, onSelect, refreshKey }) {
   const [runs, setRuns] = useState(null);
@@ -19,9 +21,14 @@ export default function RunsList({ client, selected, onSelect, refreshKey }) {
         if (!live) return;
         setRuns(body.runs);
         setError(null);
-        if (body.runs.some((r) => !TERMINAL.has(r.status))) timer = setTimeout(load, POLL_MS);
+        const active = body.runs.some((r) => !TERMINAL.has(r.status));
+        timer = setTimeout(load, active ? POLL_ACTIVE_MS : POLL_IDLE_MS);
       })
-      .catch((err) => live && setError(err.message));
+      .catch((err) => {
+        if (!live) return;
+        setError(err.message);
+        timer = setTimeout(load, POLL_IDLE_MS); // keep trying; the error clears on success
+      });
     load();
     return () => { live = false; clearTimeout(timer); };
   }, [client, refreshKey, retry]);

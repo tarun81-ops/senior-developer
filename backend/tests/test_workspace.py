@@ -232,6 +232,24 @@ def test_runner_captures_output_and_exit_code(tmp_path: Path) -> None:
     assert bad.summary().startswith("exit 3")
 
 
+def test_runner_gives_commands_an_empty_stdin(tmp_path: Path) -> None:
+    """Commands never inherit the API's stdin (D34).
+
+    In the desktop app that stdin is the shell's lifeline pipe with a thread
+    blocked reading it, and on Windows an inheriting child blocks at startup.
+    With stdin on the null device, a command that reads input gets EOF at
+    once, and nothing can hang on it.
+    """
+    runner = _runner(timeout_seconds=20)
+    started = time.monotonic()
+    result = runner.run(
+        'python -c "import sys; print(repr(sys.stdin.read()), input.__name__)"', cwd=tmp_path
+    )
+    assert result.ok, result.stderr
+    assert result.stdout.strip() == "'' input"
+    assert time.monotonic() - started < 15
+
+
 def test_runner_stops_a_timed_out_command(tmp_path: Path) -> None:
     runner = _runner(timeout_seconds=1.5)
 

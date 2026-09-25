@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { REPO_ROOT, startBackend, stopBackend } = require("./backend.cjs");
+const { startBackend, stopBackend } = require("./backend.cjs");
 
 // Must match APP_ORIGIN in backend/api/security.py exactly.
 const SCHEME = "sda";
@@ -14,6 +14,27 @@ const APP_ORIGIN = `${SCHEME}://app`;
 const DIST = path.join(__dirname, "..", "dist");
 const DEV_URL = process.env.SDA_DEV_URL; // set only by scripts/dev.mjs
 const SMOKE = process.argv.includes("--smoke");
+
+/**
+ * Where the backend comes from (D34). Installed: the bundled Python and
+ * backend in resources/, and user data under
+ * %APPDATA%\Senior Developer Agents (config and prompts stay in the install
+ * folder, D33).
+ * Development: the repo's .venv and checkout.
+ */
+function backendLaunch() {
+  if (!app.isPackaged) return {};
+  return {
+    python: path.join(process.resourcesPath, "python", "python.exe"),
+    cwd: path.join(process.resourcesPath, "backend-root"),
+  };
+}
+
+function dataRoot() {
+  if (process.env.SDA_ROOT) return process.env.SDA_ROOT;
+  if (SMOKE) return smokeRoot();
+  return app.isPackaged ? app.getPath("userData") : undefined; // undefined: the repo
+}
 
 // Before `ready`. A standard + secure scheme gives the page a real origin,
 // "sda://app", instead of the "null" a file:// page sends. The page can then
@@ -108,14 +129,16 @@ ipcMain.handle("sda:connection", (event) => {
 });
 
 /** A throwaway project root for --smoke, so it never touches data/ or workspace/. */
+let smokeRootDir = null; // removed when the smoke ends
+
 function smokeRoot() {
+  // Empty apart from the fixtures below: config and prompts come from the app
+  // itself, exactly as for an installed app's data root (D33).
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sda-smoke-"));
-  for (const dir of ["config", "backend/core/agents/prompts"]) {
-    fs.cpSync(path.join(REPO_ROOT, dir), path.join(root, dir), { recursive: true });
-  }
   // A project that already has tests/, so the pipeline detects a test command
   // and the smoke reaches a real execution gate on the offline mock model.
-  // The smoke rejects that gate, so nothing is ever executed.
+  // The development smoke rejects that gate; the installed one approves it,
+  // so the bundled Python runs this one trivial test.
   const tests = path.join(root, "workspace", "smoke-gates", "tests");
   fs.mkdirSync(tests, { recursive: true });
   fs.writeFileSync(path.join(tests, "test_ok.py"), "def test_ok():\n    pass\n");
@@ -128,6 +151,7 @@ function smokeRoot() {
     path.join(root, "workspace", "smoke-gates", "notes.md"),
     '# Notes\n<img src=x onerror="document.title=\'pwned\'">\n<script>document.title="pwned"</script>\n[click](javascript:alert(1))\n',
   );
+  smokeRootDir = root;
   return root;
 }
 
@@ -138,7 +162,10 @@ function smokeRoot() {
  */
 async function smoke(win) {
   await new Promise((resolve) => win.webContents.once("did-finish-load", resolve));
-  const script = fs.readFileSync(path.join(__dirname, "smoke-page.js"), "utf8");
+  // "installed": the production build, which has no developer menu (D27)
+  const mode = app.isPackaged ? "installed" : "dev";
+  const script = `const SMOKE_MODE = "${mode}";
+${fs.readFileSync(path.join(__dirname, "smoke-page.js"), "utf8")}`;
   const shot = process.env.SDA_SMOKE_SCREENSHOT;
   let dialogShot = null;
   if (shot) {
@@ -171,7 +198,7 @@ app.whenReady().then(async () => {
   if (!DEV_URL) Menu.setApplicationMenu(null); // no DevTools/reload menu in the real app
   lockDownSession();
   try {
-    backend = await startBackend({ root: process.env.SDA_ROOT || (SMOKE ? smokeRoot() : undefined) });
+    backend = await startBackend({ root: dataRoot(), ...backendLaunch() });
   } catch (err) {
     console.error(String(err.message || err));
     if (!SMOKE) dialog.showErrorBox("The backend failed to start", String(err.message || err));
@@ -192,6 +219,8 @@ app.whenReady().then(async () => {
     const code = await smoke(win);
     quitting = true;
     await stopBackend(backend.child);
+    // the backend has exited, so nothing holds files in the throwaway root
+    fs.rmSync(smokeRootDir, { recursive: true, force: true });
     app.exit(code);
   }
 });

@@ -33,6 +33,20 @@ function newToken() {
   return crypto.randomBytes(32).toString("base64url");
 }
 
+/**
+ * The backend's environment: this process's, minus anything that would let
+ * another Python installation leak in. User site-packages is off
+ * (PYTHONNOUSERSITE), so the bundled interpreter never borrows packages the
+ * user happens to have. Generated projects' commands inherit this too (the
+ * runner copies os.environ). See D34.
+ */
+function isolatedEnv() {
+  const env = { ...process.env, PYTHONUNBUFFERED: "1", PYTHONNOUSERSITE: "1" };
+  delete env.PYTHONPATH;
+  delete env.PYTHONHOME;
+  return env;
+}
+
 /** The venv interpreter, or SDA_PYTHON when set. */
 function pythonPath() {
   if (process.env.SDA_PYTHON) return process.env.SDA_PYTHON;
@@ -47,14 +61,17 @@ function pythonPath() {
  * it is listening. Rejects, with the exit code and the end of stderr, if the
  * process cannot start, exits, or stays silent past `timeoutMs`; it never
  * waits forever for SDA_READY.
+ *
+ * `python` and `cwd` default to the repo's .venv and checkout; the installed
+ * app passes its bundled interpreter and backend folder (D34).
  */
-function startBackend({ root, timeoutMs = 30000 } = {}) {
+function startBackend({ root, timeoutMs = 30000, python = pythonPath(), cwd = REPO_ROOT } = {}) {
   const token = newToken();
   const args = ["-m", "backend.api", "--port", "0", "--token-stdin", "--exit-with-stdin"];
   if (root) args.push("--root", root);
-  const child = spawn(pythonPath(), args, {
-    cwd: REPO_ROOT,
-    env: { ...process.env, PYTHONUNBUFFERED: "1" },
+  const child = spawn(python, args, {
+    cwd,
+    env: isolatedEnv(),
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -83,7 +100,7 @@ function startBackend({ root, timeoutMs = 30000 } = {}) {
       } else resolve(value);
     };
     const onExit = (code) => finish(`backend exited before it was ready (exit code ${code})`);
-    const onError = (err) => finish(`could not start ${pythonPath()}: ${err.message}`);
+    const onError = (err) => finish(`could not start ${python}: ${err.message}`);
     const onData = (chunk) => {
       stdout += chunk;
       try {

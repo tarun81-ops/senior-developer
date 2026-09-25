@@ -890,6 +890,91 @@ if it lives outside the package.
 
 ---
 
+## D34 — Windows installer: per-user NSIS, bundled official CPython, isolated (Packaging)
+
+**Decision:**
+
+* **Installer.** `npm run dist` builds one per-user NSIS installer with
+  `electron-builder`: no admin prompt, installed into
+  `%LOCALAPPDATA%\Programs`. It is unsigned for now.
+* **Contents.**
+  * The UI is shipped compiled (`dist/`); no `node_modules` ship, so React is
+    a dev dependency.
+  * `resources/python/` is the official CPython 3.14.7 for Windows,
+    python.org's NuGet package (publisher: Python Software Foundation). It is
+    pinned by version, size and SHA-512, and extracted with Windows'
+    `tar.exe`. `requirements-app.txt` (runtime plus `pytest`) is installed
+    into it, constrained to the exact versions in the repo's `.venv`.
+  * `resources/backend-root/` holds `backend/` (without tests) and
+    `config/`.
+* **Paths.** The installed app starts the backend with its bundled
+  interpreter and `--root %APPDATA%\Senior Developer Agents`, so user data
+  survives updates and uninstalls, and config and prompts come from the
+  install folder (D33).
+* **What `python` means for generated projects.** It is still the backend's
+  own interpreter (the runner uses `sys.executable`, Phase 3), now the
+  bundled one, so a generated Python project's tests run with no Python
+  installed. That is why this is a real CPython and not a PyInstaller
+  freeze: frozen, `sys.executable` would be the backend `.exe`.
+* **Isolation.**
+  * Every run of the bundled Python sets `PYTHONNOUSERSITE=1` and clears
+    `PYTHONPATH`/`PYTHONHOME`, at build time and in the app.
+  * The runner copies `os.environ`, so generated projects inherit this.
+  * The build refuses a bundle whose modules import from outside
+    `sys.prefix`.
+* **Verification.**
+  * `npm run bundle` checks the bundle before it succeeds: imports, a real
+    backend launch answering health and settings from an empty data root,
+    and `python -m pytest` on a sample project.
+  * `npm run smoke:installed` builds nothing new. It installs the real
+    installer silently into a temp folder, runs the installed app's
+    `--smoke`, and uninstalls. The self-check covers the security posture,
+    the production build having no developer menu, and a run on the offline
+    mock (started through the API from the page) whose execution gate is
+    approved. The bundled Python then runs the project's test and the run
+    must succeed with tests passed.
+  * Uninstalling was checked to leave no registry entry, shortcut or install
+    folder behind.
+
+**Three real bugs this found, all fixed:**
+
+1. **Borrowed packages.** The bundled interpreter had user site-packages on.
+   pip treated the developer's `%APPDATA%\Python` packages (fastapi among
+   them) as installed and skipped them, and the first verification passed
+   only by borrowing them. On any other machine the app would not have
+   started.
+2. **Stdin deadlock.** In the app the backend's stdin is the shell's
+   lifeline pipe, with a thread blocked reading it (D25). The runner started
+   commands without a stdin, so they inherited that pipe. On Windows,
+   synchronous pipe I/O is serialised per handle, so the child Python
+   blocked at startup (0.03 s of CPU, one thread) until the app quit, and
+   every approved command would have hung until its timeout. The runner and
+   `taskkill` now use `stdin=DEVNULL`, which also means a command that waits
+   for input gets EOF instead of hanging. Development never hit this:
+   development smoke rejects the execution gate, and the CLI doesn't read
+   stdin.
+3. **Runs list gap.** A run started anywhere but the form never appeared
+   until something else refreshed the list. The list now also re-reads
+   every 10 s when idle (2 s while a run is active).
+
+Also fixed: the Electron smoke never deleted its throwaway data root (75
+leftover `sda-smoke-*` folders in `%TEMP%`). It now removes it once the
+backend has exited.
+
+**Why:** "works on the machine that built it" is exactly what an installer
+must not rely on. Every check that counts runs against the built artifact:
+the bundle verification, the installed app's self-check, and the uninstall.
+Two of the three bugs were invisible to every earlier test.
+
+**Cost accepted:**
+* About 133 MB (Electron plus a full CPython).
+* SmartScreen warns until the installer is signed.
+* A generated Python project's own third-party dependencies can't be
+  installed into the bundled interpreter (stdlib and `pytest` only).
+* No auto-update: a new version is installed over the old one.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |
@@ -898,6 +983,6 @@ if it lives outside the package.
 | 1 | Repo scaffold, config layer, provider layer (router, retries, quota, budgets, events), CLI, tests | done |
 | 2 | Specialist agents (planner, architect, coder, tester, reviewer, devops, docs) + orchestrator with shared task board | done |
 | 3 | Workspace execution: generate files, run tests/builds, iterate | done |
-| 4 | FastAPI backend + Electron/React desktop UI | done (Part A, the API; Part B, B1–B6). Packaging deferred |
+| 4 | FastAPI backend + Electron/React desktop UI | done (Part A, the API; Part B, B1–B6; Windows installer, D34) |
 | 5 | Deploy generated apps (Vercel + Render) | not started |
 

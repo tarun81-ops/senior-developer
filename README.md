@@ -18,8 +18,8 @@ crash.
 > tests drive another coder round just like a review objection.
 > **Phase 4 wraps that pipeline in a local FastAPI server** for the Electron
 > desktop UI (see [Local API](#local-api-phase-4-part-a--done) and
-> [Desktop app](#desktop-app-phase-4-part-b--done)). Both are done; packaging
-> the app as an installer is the one thing deferred.
+> [Desktop app](#desktop-app-phase-4-part-b--done)), and ships as a Windows
+> installer (see [Windows installer](#windows-installer)).
 
 ---
 
@@ -364,6 +364,48 @@ How it fits together (D25, D26):
 
 ---
 
+## Windows installer
+
+The app ships as one per-user installer: no admin prompt, and nothing to
+install first. It bundles the official CPython 3.14.7 for Windows (from
+python.org's NuGet package) with the backend's dependencies and `pytest`, so
+it runs on a machine without Python. Node projects still use the Node on your
+PATH, as they do in development.
+
+Build it (PowerShell, from the repo root, with the `.venv` from the
+Quickstart). The first build downloads Python (15.6 MB, SHA-512 pinned) and
+electron-builder's NSIS tools, and takes about 4 minutes:
+
+```powershell
+cd desktop; npm install; npm run dist
+```
+
+The output is `desktop\release\Senior Developer Agents Setup 0.1.0.exe`
+(about 133 MB). To test the real installer end to end, run:
+
+```powershell
+npm run smoke:installed
+```
+
+That installs silently into a temp folder, runs the installed app's
+self-check, then uninstalls. The self-check covers the security checks and a
+run whose execution gate is approved, so the bundled Python runs a real
+test.
+
+Where things live once installed (D33, D34):
+
+| What | Where |
+|---|---|
+| App, bundled Python, backend, `config/`, prompts | `%LOCALAPPDATA%\Programs\senior-developer-desktop\` (updated by reinstalling) |
+| Runs, events, settings overrides (`data/`), generated projects (`workspace/`), `.env` keys | `%APPDATA%\Senior Developer Agents\` (kept across updates and uninstalls) |
+
+The installer is **unsigned**, so on first run Windows SmartScreen shows
+"Windows protected your PC". Choose **More info** and then **Run anyway**.
+Signing needs a paid code-signing certificate and can be added later without
+other changes.
+
+---
+
 ## Project layout
 
 ```
@@ -391,7 +433,7 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                270 tests, no network, no keys required
+  tests/                275 tests, no network, no keys required
 desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
   electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
@@ -409,7 +451,10 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   src/settingsModel.js  settings rules: pickable providers, request body, keys
   src/RunsList.jsx      run history, newest first, polled while a run is active
   test/                 node --test: client, form rules, bundle, hostile markdown, shell
-docs/DECISIONS.md       why each decision was made (D1–D32)
+  scripts/bundle-backend.mjs   npm run bundle: pinned CPython + deps + backend, verified
+  scripts/smoke-installed.mjs  npm run smoke:installed: install, self-check, uninstall
+requirements-app.txt    what the installer's bundled Python gets (runtime + pytest)
+docs/DECISIONS.md       why each decision was made (D1–D34)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -420,7 +465,7 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 270 tests (1 skipped without symlink rights), ~50s
+.\.venv\Scripts\python -m pytest          # 275 tests (1 skipped without symlink rights), ~50s
 ```
 
 ```powershell
@@ -500,8 +545,10 @@ data in prompts.
   keys, ignored-settings warning), and a fix for an approval-dialog race
   (D31). B6 done: run history across restarts (runs saved in `app.db`,
   interrupted runs recovered), Cancel run in the approval dialog, and a
-  window title that flags a waiting approval (D32). Deferred: packaging
-  (bundling Python, an installer).
+  window title that flags a waiting approval (D32). Packaging done: a
+  per-user Windows installer with a bundled, isolated official CPython,
+  user data in %APPDATA%, and an end-to-end installed-app smoke test
+  (D33, D34).
 - **Phase 5** — deploy: Vercel (frontend) + Render (backend).
 
 
