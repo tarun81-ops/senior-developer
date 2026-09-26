@@ -349,6 +349,12 @@ Deploying a finished run (Phase 5, D35–D41):
   write-only, like the model keys. Render also needs its GitHub app
   installed on your account with access to all repositories.
 
+Web research (D42): with `FIRECRAWL_API_KEY` set (in `.env`, or Settings →
+API keys → **Web research**), every agent may ask for up to 3 web searches
+before answering. Results come back as untrusted reference text; each
+search shows in the timeline; a run makes at most 12. Without the key,
+agents are never offered it.
+
 What B6 gives you:
 
 - **Run history.** A **Runs** list under the New run form shows every run,
@@ -463,7 +469,7 @@ backend/
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
     workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                382 tests, no network, no keys required
+  tests/                387 tests, no network, no keys required
 desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
   electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
@@ -484,7 +490,7 @@ desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   scripts/bundle-backend.mjs   npm run bundle: pinned CPython + deps + backend, verified
   scripts/smoke-installed.mjs  npm run smoke:installed: install, self-check, uninstall
 requirements-app.txt    what the installer's bundled Python gets (runtime + pytest)
-docs/DECISIONS.md       why each decision was made (D1–D41)
+docs/DECISIONS.md       why each decision was made (D1–D42)
 scripts/setup.ps1       one-shot Windows setup
 data/                   runtime state (quota, runs, events) — git-ignored
 workspace/              where generated apps will live — git-ignored
@@ -495,7 +501,7 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 382 tests (2 skipped without symlink rights), ~90s
+.\.venv\Scripts\python -m pytest          # 387 tests (2 skipped without symlink rights), ~90s
 ```
 
 ```powershell

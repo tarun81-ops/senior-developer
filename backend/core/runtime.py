@@ -21,6 +21,7 @@ from backend.core.provider.client import OpenAICompatClient
 from backend.core.provider.ratelimit import QuotaLedger
 from backend.core.provider.registry import AgentConfig, Registry
 from backend.core.provider.router import ProviderRouter, RouterOptions
+from backend.core.research import Researcher
 
 
 def new_run_id() -> str:
@@ -38,6 +39,8 @@ class Runtime:
     bus: EventBus
     budget: BudgetTracker
     router: ProviderRouter
+    #: web search for every agent (D42); None without FIRECRAWL_API_KEY
+    researcher: Researcher | None = None
 
     @property
     def run_id(self) -> str:
@@ -92,6 +95,7 @@ class Runtime:
             bus=bus,
             budget=budget,
             router=router,
+            researcher=Researcher.from_env(),
         )
 
     # -- agents --------------------------------------------------------------
@@ -103,8 +107,14 @@ class Runtime:
         # prompt files ship with the code, and an installed app's data root
         # (%APPDATA%) has none (D33). In a repo checkout the two are the same.
         return Agent(
-            self.registry.agent(name), router=self.router, bus=self.bus, root=PACKAGE_ROOT
+            self.registry.agent(name),
+            router=self.router,
+            bus=self.bus,
+            root=PACKAGE_ROOT,
+            researcher=self.researcher,
         )
 
     def close(self) -> None:
         self.router.close()
+        if self.researcher:
+            self.researcher.close()

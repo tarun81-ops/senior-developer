@@ -65,14 +65,18 @@ export function keysToSend(entered) {
   );
 }
 
-/** Deploy credentials (D41), shown apart from the model providers' keys. */
-export const DEPLOY_KEY_HELP = {
+/** Web research (D42) and deploy credentials (D41), shown apart from the model providers' keys. */
+export const RESEARCH_KEYS = ["FIRECRAWL_API_KEY"];
+export const KEY_HELP = {
+  FIRECRAWL_API_KEY: "optional; lets every agent search the web (firecrawl.dev → API keys)",
   GITHUB_TOKEN: "fine-grained token: Administration, Contents, Pages, Workflows (read/write), Actions (read)",
   RENDER_API_KEY: "Render account settings → API keys",
   RENDER_OWNER_ID: "optional; only if your Render key reaches several workspaces",
 };
 
-/** Split key names into [model provider keys, deploy keys]. */
+/** Split key names into [model provider keys, research keys, deploy keys]. */
 export function keyGroups(names) {
-  return [names.filter((n) => !(n in DEPLOY_KEY_HELP)), names.filter((n) => n in DEPLOY_KEY_HELP)];
+  const research = names.filter((n) => RESEARCH_KEYS.includes(n));
+  const deploy = names.filter((n) => n in KEY_HELP && !research.includes(n));
+  return [names.filter((n) => !(n in KEY_HELP)), research, deploy];
 }

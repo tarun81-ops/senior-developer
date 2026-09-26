@@ -24,6 +24,8 @@ KEY_VARS = (
     "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
     # deploy credentials (D41)
     "GITHUB_TOKEN", "RENDER_API_KEY", "RENDER_OWNER_ID",
+    # web research (D42)
+    "FIRECRAWL_API_KEY",
 )
 FAKE_KEY = "AIza-fake-test-key-0123456789"
 
@@ -140,6 +142,7 @@ def test_keys_are_write_only(client: TestClient, root: Path) -> None:
     assert response.json()["keys"] == {
         "GEMINI_API_KEY": "set", "GROQ_API_KEY": "missing", "OPENROUTER_API_KEY": "missing",
         "GITHUB_TOKEN": "missing", "RENDER_API_KEY": "missing", "RENDER_OWNER_ID": "missing",
+        "FIRECRAWL_API_KEY": "missing",
     }
     assert FAKE_KEY not in response.text
     for path in ("/api/settings", "/api/health"):

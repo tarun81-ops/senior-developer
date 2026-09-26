@@ -44,6 +44,8 @@ FAKE_KEYS = {
     # deploy credentials must never come back either (D41)
     "GITHUB_TOKEN": "github_pat_e2e_" + "g" * 30,
     "RENDER_API_KEY": "rnd_e2e" + "r" * 24,
+    # and the web research key (D42)
+    "FIRECRAWL_API_KEY": "fc-e2e" + "f" * 26,
 }
 
 #: The whole API surface (Part A, the B4 file routes, the P5.5 deploy routes). A new route fails
@@ -354,7 +356,7 @@ def test_no_response_ever_contains_a_key_value(
         **dict.fromkeys(
             (
                 "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
-                "GITHUB_TOKEN", "RENDER_API_KEY",
+                "GITHUB_TOKEN", "RENDER_API_KEY", "FIRECRAWL_API_KEY",
             ),
             "set",
         ),

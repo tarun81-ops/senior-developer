@@ -24,11 +24,14 @@ from backend.core.local_settings import (
     write_overrides,
 )
 from backend.core.provider.registry import Registry
+from backend.core.research import KEY_ENV
 
 #: Deploy credentials (Phase 5, D41). Write-only like provider keys (D22):
 #: saved to .env, reported only as set/missing. RENDER_OWNER_ID is not a
 #: secret but is handled the same way, which keeps one simple rule.
 DEPLOY_KEYS = ("GITHUB_TOKEN", "RENDER_API_KEY", "RENDER_OWNER_ID")
+#: Keys that belong to no model provider, handled the same way (D41, D42).
+EXTRA_KEYS = (*DEPLOY_KEYS, KEY_ENV)
 
 #: Route handlers run in a threadpool. Two PUTs must not share a temp file.
 _write_lock = threading.Lock()
@@ -67,7 +70,7 @@ def snapshot(settings: Settings) -> SettingsResponse:
                 spec.api_key_env: "set" if registry.api_key_for(spec) else "missing"
                 for spec in _keyed(registry)
             },
-            **{name: "set" if os.environ.get(name) else "missing" for name in DEPLOY_KEYS},
+            **{name: "set" if os.environ.get(name) else "missing" for name in EXTRA_KEYS},
         },
         warnings=[warning] if warning else [],
     )
@@ -86,7 +89,7 @@ def update_keys(settings: Settings, keys: dict[str, str]) -> SettingsResponse:
     # Expected names come from the tracked config alone, so a broken local
     # overrides file cannot block fixing a key.
     tracked = Registry.load(settings, overrides=LocalOverrides())
-    expected = sorted([spec.api_key_env for spec in _keyed(tracked)] + list(DEPLOY_KEYS))
+    expected = sorted([spec.api_key_env for spec in _keyed(tracked)] + list(EXTRA_KEYS))
     unknown = sorted(set(keys) - set(expected))
     if unknown:
         raise ValueError(

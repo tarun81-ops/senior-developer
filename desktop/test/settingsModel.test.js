@@ -69,11 +69,12 @@ test("only typed keys are sent, trimmed", () => {
   });
 });
 
-test("deploy keys are grouped apart from model provider keys (D41)", async () => {
+test("research and deploy keys are grouped apart from model provider keys (D41, D42)", async () => {
   const { keyGroups } = await import("../src/settingsModel.js");
-  const names = ["GEMINI_API_KEY", "GITHUB_TOKEN", "GROQ_API_KEY", "RENDER_API_KEY", "RENDER_OWNER_ID"];
+  const names = ["FIRECRAWL_API_KEY", "GEMINI_API_KEY", "GITHUB_TOKEN", "GROQ_API_KEY", "RENDER_API_KEY", "RENDER_OWNER_ID"];
   assert.deepEqual(keyGroups(names), [
     ["GEMINI_API_KEY", "GROQ_API_KEY"],
+    ["FIRECRAWL_API_KEY"],
     ["GITHUB_TOKEN", "RENDER_API_KEY", "RENDER_OWNER_ID"],
   ]);
 });

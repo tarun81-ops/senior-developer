@@ -3,7 +3,7 @@
 // cleared, and only ever shown back as "set" or "missing".
 import { useEffect, useState } from "react";
 
-import { DEPLOY_KEY_HELP, draftFrom, keyGroups, keysToSend, modelOptions, move, pinKey, updateFrom } from "./settingsModel.js";
+import { KEY_HELP, draftFrom, keyGroups, keysToSend, modelOptions, move, pinKey, updateFrom } from "./settingsModel.js";
 
 const DEV = import.meta.env.DEV;
 
@@ -131,7 +131,7 @@ function ModelSettings({ client, settings, onSaved, status, setStatus }) {
 function KeySettings({ client, settings, onSaved }) {
   const [entered, setEntered] = useState({});
   const [status, setStatus] = useState(null);
-  const [providerKeys, deployKeys] = keyGroups(Object.keys(settings.keys));
+  const [providerKeys, researchKeys, deployKeys] = keyGroups(Object.keys(settings.keys));
   const row = (name) => (
     <label key={name} className="key-row" data-key={name}>
       <code>{name}</code>
@@ -145,7 +145,7 @@ function KeySettings({ client, settings, onSaved }) {
         autoComplete="new-password"
         spellCheck={false}
       />
-      {DEPLOY_KEY_HELP[name] && <span className="muted key-help">{DEPLOY_KEY_HELP[name]}</span>}
+      {KEY_HELP[name] && <span className="muted key-help">{KEY_HELP[name]}</span>}
     </label>
   );
 
@@ -174,6 +174,8 @@ function KeySettings({ client, settings, onSaved }) {
       </p>
       <h3>Model providers</h3>
       {providerKeys.map(row)}
+      <h3>Web research (Firecrawl)</h3>
+      {researchKeys.map(row)}
       <h3>Deploying (GitHub Pages, Render)</h3>
       {deployKeys.map(row)}
       {status?.error && <p className="error">{status.error}</p>}

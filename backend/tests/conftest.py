@@ -11,6 +11,12 @@ from backend.core.provider.ratelimit import QuotaLedger
 from backend.core.provider.registry import CooldownConfig, RetryConfig
 
 
+@pytest.fixture(autouse=True)
+def _no_real_web_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never reach Firecrawl with a real key from the shell or .env (D42)."""
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+
+
 @pytest.fixture
 def events_file(tmp_path: Path) -> Path:
     return tmp_path / "events.jsonl"
