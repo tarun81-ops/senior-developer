@@ -142,7 +142,64 @@ export function createClient({ baseUrl, token, fetch: fetchImpl = globalThis.fet
     readFile: (id, path) =>
       request("GET", `/api/runs/${encodeURIComponent(id)}/files/content?${new URLSearchParams({ path })}`),
     followRun,
+    getTerminal: (id) => request("GET", `/api/runs/${encodeURIComponent(id)}/terminal`),
+    sendTerminalCommand: (id, command) =>
+      request("POST", `/api/runs/${encodeURIComponent(id)}/terminal/input`, { command }),
+    interruptTerminal: (id) => request("POST", `/api/runs/${encodeURIComponent(id)}/terminal/interrupt`),
+    restartTerminal: (id) => request("POST", `/api/runs/${encodeURIComponent(id)}/terminal/restart`),
+    followTerminal: (id, onChunk, options) => followTerminal(baseUrl, headers, fetchImpl, id, onChunk, options),
   };
+}
+
+/**
+ * Follow one run's terminal output (D43): replay-then-live, reconnecting with
+ * backoff exactly like `followRun`, but with no "closing event" — a shell
+ * exiting is just another chunk (`closed: true`), not the end of the stream.
+ * Only the caller aborting `signal` ends it.
+ */
+async function followTerminal(baseUrl, headers, fetchImpl, runId, onChunk, { afterSeq = 0, signal, backoff = {} } = {}) {
+  const { initialMs = 250, maxMs = 5000, sleep = defaultSleep } = backoff;
+  let delay = initialMs;
+  let cursor = afterSeq;
+  for (;;) {
+    const before = cursor;
+    try {
+      cursor = await terminalStreamOnce(baseUrl, headers, fetchImpl, runId, cursor, onChunk, signal);
+    } catch (err) {
+      if (signal?.aborted || err instanceof ApiError) throw err;
+      // network drop: retry from the cursor
+    }
+    if (cursor > before) delay = initialMs;
+    await sleep(delay, signal);
+    delay = Math.min(delay * 2, maxMs);
+  }
+}
+
+async function terminalStreamOnce(baseUrl, headers, fetchImpl, runId, afterSeq, onChunk, signal) {
+  const query = new URLSearchParams({ after_seq: String(afterSeq) });
+  const response = await fetchImpl(`${baseUrl}/api/runs/${encodeURIComponent(runId)}/terminal/stream?${query}`, {
+    headers: headers({ Accept: "text/event-stream" }),
+    signal,
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new ApiError(response.status, payload?.detail ?? payload);
+  }
+  let cursor = afterSeq;
+  const parser = createSseParser(({ data }) => {
+    const chunk = JSON.parse(data);
+    if (chunk.seq <= cursor) return; // never deliver twice, whatever the server does
+    cursor = chunk.seq;
+    onChunk(chunk);
+  });
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    parser.push(value);
+  }
+  parser.push("\n\n"); // flush a final frame the server didn't terminate
+  return cursor;
 }
 
 function defaultSleep(ms, signal) {

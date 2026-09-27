@@ -56,16 +56,19 @@ from backend.api.models import (
     RunStateResponse,
     SettingsResponse,
     SettingsUpdateRequest,
+    TerminalCommandRequest,
+    TerminalStatusResponse,
 )
 from backend.api.repository import SqliteEventRepository
 from backend.api.run_manager import GateNotWaiting, RunManager, RunNotFound, RunOptions
 from backend.api.security import ALLOWED_ORIGINS, LaunchSecurity, require_token
-from backend.api.stream import StreamOwners, event_frames
+from backend.api.stream import StreamOwners, event_frames, terminal_frames
 from backend.api.workspace_files import list_files, read_file
 from backend.core.config import get_settings, load_env
 from backend.core.errors import ConfigError
 from backend.core.runtime import Runtime
 from backend.core.workspace.sandbox import UnsafePath
+from backend.core.workspace.terminal import TerminalBusy, TerminalManager, TerminalStartError
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,11 @@ def get_event_store(request: Request) -> EventStore:
 def get_run_manager(request: Request) -> RunManager:
     """FastAPI dependency: the process-wide run manager."""
     return request.app.state.run_manager
+
+
+def get_terminal_manager(request: Request) -> TerminalManager:
+    """FastAPI dependency: the process-wide terminal manager (D43)."""
+    return request.app.state.terminal_manager
 
 
 def create_app(
@@ -118,6 +126,9 @@ def create_app(
     # Phase 5: deploys of finished runs (D40). ``deploy_clients`` is the seam
     # tests use to hand it fake GitHub/Render clients.
     deploys = DeployManager(runs=manager, event_store=event_store, clients=deploy_clients)
+    # Part B, terminal tab (D43): a human's own PowerShell, one per run,
+    # entirely separate from the agents' sandboxed CommandRunner.
+    terminals = TerminalManager()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -131,6 +142,8 @@ def create_app(
             # stalling the event loop.
             await run_in_threadpool(manager.shutdown)
             deploys.shutdown()
+            # Kill any live terminal shells: nothing should outlive the app.
+            await run_in_threadpool(terminals.shutdown)
             event_store.close()
 
 
@@ -158,6 +171,7 @@ def create_app(
     app.state.event_store = event_store
     app.state.run_manager = manager
     app.state.deploy_manager = deploys
+    app.state.terminal_manager = terminals
 
     # CORS is a browser rule, not authentication: it only tells a *browser*
     # whether to let page JavaScript read the response. The token still guards
@@ -343,6 +357,104 @@ def create_app(
                 status_code=404, detail="No such file in this run's project"
             ) from None
         return FileContentResponse(run_id=run_id, **found.__dict__)
+
+    # -- terminal (Part B; D43) ------------------------------------------------
+    # A second, deliberate execution path, entirely separate from the agents'
+    # sandboxed, allowlisted CommandRunner (backend/core/workspace/runner.py):
+    # this one runs a real, unrestricted powershell.exe for the *person*, who
+    # already has full access to their own machine. It only bounds *where*
+    # the shell starts (the run's own project folder) and *when* it exists
+    # (one per run, killed on shutdown) — see terminal.py's module docstring.
+    def _project_dir_or_404(run_id: str) -> Path:
+        try:
+            folder = manager.project_dir(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if folder is None:
+            raise HTTPException(status_code=404, detail="This run has no project folder yet")
+        return folder
+
+    @api.get("/runs/{run_id}/terminal", response_model=TerminalStatusResponse)
+    def terminal_status(
+        run_id: str,
+        terminals: TerminalManager = Depends(get_terminal_manager),
+    ) -> TerminalStatusResponse:
+        """Whether a shell is running yet, and whether it's busy (starts one
+        on first call, same as opening the tab in the UI)."""
+        folder = _project_dir_or_404(run_id)
+        record = terminals.get_or_create(run_id, folder)
+        return TerminalStatusResponse(
+            run_id=run_id,
+            cwd=str(record.cwd),
+            busy=record.busy,
+            closed=record.closed,
+            last_seq=record.last_seq,
+            start_error=record.start_error,
+        )
+
+    @api.get("/runs/{run_id}/terminal/stream")
+    async def stream_terminal(
+        run_id: str,
+        after_seq: int = Query(0, ge=0, description="Send chunks with seq > this"),
+        terminals: TerminalManager = Depends(get_terminal_manager),
+    ) -> StreamingResponse:
+        """Live SSE stream of this run's terminal output (D43). Never closes
+        on its own — see :func:`terminal_frames` — so the UI just keeps one
+        connection open for as long as the tab is."""
+        folder = _project_dir_or_404(run_id)
+        record = terminals.get_or_create(run_id, folder)
+        return StreamingResponse(
+            terminal_frames(record, after_seq=after_seq),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @api.post("/runs/{run_id}/terminal/input", status_code=202)
+    def submit_terminal_command(
+        run_id: str,
+        body: TerminalCommandRequest,
+        terminals: TerminalManager = Depends(get_terminal_manager),
+    ) -> dict[str, bool]:
+        """Run one line in this run's shell. ``409`` if a command is already
+        running; the UI's input is disabled while ``busy`` for the same
+        reason, this is the server enforcing it too."""
+        folder = _project_dir_or_404(run_id)
+        record = terminals.get_or_create(run_id, folder)
+        try:
+            record.submit(body.command)
+        except TerminalBusy as exc:
+            raise HTTPException(
+                status_code=409, detail="The terminal is still running the previous command"
+            ) from exc
+        except TerminalStartError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"accepted": True}
+
+    @api.post("/runs/{run_id}/terminal/interrupt", status_code=202)
+    def interrupt_terminal(
+        run_id: str,
+        terminals: TerminalManager = Depends(get_terminal_manager),
+    ) -> dict[str, bool]:
+        """Best-effort Ctrl+Break for a hung foreground command. A no-op if
+        nothing is running, so the UI can call it without checking first."""
+        _project_dir_or_404(run_id)
+        record = terminals.get(run_id)
+        if record is not None:
+            record.interrupt()
+        return {"accepted": True}
+
+    @api.post("/runs/{run_id}/terminal/restart", status_code=202)
+    def restart_terminal(
+        run_id: str,
+        terminals: TerminalManager = Depends(get_terminal_manager),
+    ) -> dict[str, bool]:
+        """Kill the current shell; the next command starts a fresh one. For a
+        stuck session, or just a clean slate."""
+        _project_dir_or_404(run_id)
+        record = terminals.get(run_id)
+        if record is not None:
+            record.close()
+        return {"accepted": True}
 
     # -- deploys (Phase 5, P5.5; D35-D40) ---------------------------------------
     # Preview is local and read-only; deploy publishes, so, like approve and

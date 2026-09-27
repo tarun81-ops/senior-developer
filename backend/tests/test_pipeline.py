@@ -1,8 +1,8 @@
-"""Phase 2 orchestrator tests: task board, stage order, fix loop, budgets.
+"""Orchestrator tests: task board, triage, auto-check loop, review loop, escalation.
 
 Everything runs offline against mock providers — the pipeline mechanics (order,
-context wiring, review gating, persistence, budget stops) are what we guard
-here; token spending is tested once and cheaply, never with live keys.
+context wiring, loop counting, escalation, persistence, budget stops) are what
+we guard here; token spending is tested once and cheaply, never with live keys.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from backend.core.agents import AgentResult, extract_json_block
 from backend.core.errors import AllProvidersFailed, BudgetExceeded, ConfigError
 from backend.core.orchestrator import Pipeline, TaskBoard
 from backend.core.orchestrator.board import DONE, FAILED, PENDING, SKIPPED
+from backend.core.orchestrator.triage import classify
 from backend.core.provider.schemas import Completion, Usage
 from backend.tests.helpers import build_pipeline_runtime
 
@@ -27,7 +28,7 @@ class RecordingPipeline(Pipeline):
         super().__init__(*args, **kwargs)
         self.calls: list[dict] = []
 
-    def _execute(self, board, stage, *, goal, context, fix=False):  # type: ignore[override]
+    def _execute(self, board, stage, *, goal, context, fix=False, override=None):  # type: ignore[override]
         self.calls.append(
             {
                 "stage": stage,
@@ -36,10 +37,10 @@ class RecordingPipeline(Pipeline):
                 "fix": fix,
             }
         )
-        super()._execute(board, stage, goal=goal, context=context, fix=fix)
+        super()._execute(board, stage, goal=goal, context=context, fix=fix, override=override)
 
 
-GOAL = "build a todo app"
+GOAL = "build a todo app with a database and multiple concurrent users"
 
 
 def test_board_round_trip_preserves_state(tmp_path: Path) -> None:
@@ -74,6 +75,100 @@ def test_board_round_trip_preserves_state(tmp_path: Path) -> None:
     assert loaded.order == ["a", "b"]
 
 
+def test_board_accumulates_files_across_attempts(tmp_path: Path) -> None:
+    """A coder fix round may emit only the files it changed; earlier files
+    from a previous attempt of the same stage must not disappear."""
+    board = TaskBoard.new(run_id="r1", goal="g", stages=["coder"], agents={"coder": "coder"})
+    board.save(tmp_path)
+    board.start("coder", agent="coder")
+    board.complete(
+        "coder",
+        text="{}",
+        parsed={"files": [{"path": "a.py", "content": "one"}, {"path": "b.py", "content": "two"}]},
+        target="mock/m",
+        tokens=1,
+        latency_ms=1,
+    )
+    board.start("coder", agent="coder")
+    board.complete(
+        "coder",
+        text="{}",
+        parsed={"files": [{"path": "a.py", "content": "ONE-FIXED"}]},
+        target="mock/m",
+        tokens=1,
+        latency_ms=1,
+    )
+
+    rendered = board.rendered_files("coder")
+    assert "ONE-FIXED" in rendered
+    assert "two" in rendered  # b.py survived even though the fix only touched a.py
+
+
+# --------------------------------------------------------------------------- #
+# triage
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("goal", "expected"),
+    [
+        ("a calculator", "small"),
+        ("build a simple calculator app", "small"),
+        ("build a todo app with a REST API and a database backend for many users", "large"),
+        ("build a distributed job queue with websocket notifications", "large"),
+        ("build a note-taking app that syncs across a handful of devices for one user", "medium"),
+    ],
+)
+def test_triage_classifies_goal_size(goal: str, expected: str) -> None:
+    assert classify(goal) == expected
+
+
+def test_triage_routes_a_small_goal_to_the_fast_lane(tmp_path: Path) -> None:
+    runtime = build_pipeline_runtime(
+        tmp_path,
+        triage=True,
+        apply_workspace=True,
+        run_tests=False,
+        replies={"coder": '{"files": [{"path": "calc.py", "content": "print(1+1)"}]}'},
+    )
+    pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
+
+    result = pipeline.run("a calculator")
+
+    assert result.size == "small"
+    assert result.ok is True
+    assert [call["stage"] for call in pipeline.calls] == ["coder"]
+    # the fast lane skips planner/architect, so the coder must still see what
+    # was actually asked for - not just the generic "implement everything"
+    # instruction with no goal anywhere (that produced boilerplate in practice)
+    assert pipeline.calls[0]["context"] == {"request": "a calculator"}
+    board = TaskBoard.load(result.board_path)
+    assert board.order == ["coder"]
+
+
+def test_triage_routes_a_large_goal_through_the_full_pipeline(tmp_path: Path) -> None:
+    runtime = build_pipeline_runtime(tmp_path, triage=True)
+    pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
+
+    result = pipeline.run(GOAL)  # explicitly a "large" goal (database, multi-user)
+
+    assert result.size == "large"
+    assert [call["stage"] for call in pipeline.calls] == [
+        "planner", "architect", "coder", "tester", "reviewer", "devops", "docs",
+    ]
+
+
+def test_explicit_stages_bypass_triage_even_for_a_small_goal(tmp_path: Path) -> None:
+    runtime = build_pipeline_runtime(tmp_path, triage=True, stages=["planner"])
+    pipeline = RecordingPipeline(runtime, stages=["planner"], board_path=tmp_path / "board.json")
+
+    result = pipeline.run("a calculator")
+
+    assert result.size == "custom"
+    assert [call["stage"] for call in pipeline.calls] == ["planner"]
+
+
+# --------------------------------------------------------------------------- #
+# stage order and context wiring (triage disabled: helpers.py default)
+# --------------------------------------------------------------------------- #
 def test_pipeline_runs_stages_in_order_and_wires_context(tmp_path: Path) -> None:
     runtime = build_pipeline_runtime(tmp_path)
     pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
@@ -114,19 +209,23 @@ def test_pipeline_runs_stages_in_order_and_wires_context(tmp_path: Path) -> None
         assert board.records[name].target.startswith("mock_")
 
 
-def test_changes_requested_runs_fix_loop_then_stops_for_a_human(tmp_path: Path) -> None:
+def test_reviewer_blocker_runs_the_fix_loop_then_escalates(tmp_path: Path) -> None:
     runtime = build_pipeline_runtime(
         tmp_path,
-        reviewer_reply='{"verdict": "changes_requested", "issues": []}',
-        max_fix_iterations=1,
+        reviewer_reply='{"verdict": "reject", "blockers": ["missing input validation"]}',
+        max_review_iterations=1,
     )
     pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
 
     result = pipeline.run(GOAL)
 
     assert result.ok is False
-    assert result.reason == "review"
-    assert result.verdict == "changes_requested"
+    assert result.reason == "escalated"
+    assert result.escalation is not None
+    assert result.escalation["stage"] == "reviewer"
+    assert result.escalation["reason"] == "review_blockers"
+    assert "missing input validation" in result.escalation["error"]
+    assert result.escalation["code"]  # the current code travels with it
 
     coder_calls = [c for c in pipeline.calls if c["stage"] == "coder"]
     reviewer_calls = [c for c in pipeline.calls if c["stage"] == "reviewer"]
@@ -134,21 +233,50 @@ def test_changes_requested_runs_fix_loop_then_stops_for_a_human(tmp_path: Path) 
     assert len(reviewer_calls) == 2
     assert coder_calls[0]["fix"] is False
     assert coder_calls[1]["fix"] is True
-    # the fix round sees the previous code AND the review that demanded changes
-    assert set(coder_calls[1]["context"]) == {"planner", "architect", "coder", "reviewer"}
+    # the fix round is minimal: current code + exact error + one-line history,
+    # never the full plan/design context
+    assert set(coder_calls[1]["context"]) == {"code", "error", "history"}
+    assert "missing input validation" in coder_calls[1]["context"]["error"]
 
     board = TaskBoard.load(result.board_path)
     assert board.records["coder"].attempts == 2
     assert board.records["reviewer"].attempts == 2
-    # stages after the unresolved review never ran
+    # stages after the escalation never ran
     assert board.records["devops"].status == SKIPPED
     assert board.records["docs"].status == SKIPPED
-    assert board.ok is False
 
     lines = (tmp_path / "events.jsonl").read_text().splitlines()
     kinds = [json.loads(line)["kind"] for line in lines]
     assert "pipeline.fix" in kinds
-    assert "pipeline.unresolved_review" in kinds
+    assert "pipeline.escalated" in kinds
+
+
+def test_reviewer_reject_with_no_blockers_is_treated_as_approval(tmp_path: Path) -> None:
+    runtime = build_pipeline_runtime(
+        tmp_path, reviewer_reply='{"verdict": "reject", "blockers": []}'
+    )
+    pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
+
+    result = pipeline.run(GOAL)
+
+    assert result.ok is True
+    board = TaskBoard.load(result.board_path)
+    assert any("no blockers listed" in note for note in board.records["reviewer"].notes)
+    # no fix loop happened: a reject without a blocker is not a real reject
+    assert len([c for c in pipeline.calls if c["stage"] == "coder"]) == 1
+
+
+def test_reviewer_suggestions_never_block_approval(tmp_path: Path) -> None:
+    runtime = build_pipeline_runtime(
+        tmp_path,
+        reviewer_reply='{"verdict": "approve", "suggestions": ["rename this variable"]}',
+    )
+    pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
+
+    result = pipeline.run(GOAL)
+
+    assert result.ok is True
+    assert result.verdict == "approve"
 
 
 def test_unparseable_reviewer_output_does_not_deadlock_the_pipeline(tmp_path: Path) -> None:
@@ -204,8 +332,73 @@ def test_unknown_verdict_wording_is_treated_as_approval(tmp_path: Path) -> None:
     assert any("unrecognised verdict" in note for note in board.records["reviewer"].notes)
 
 
+def test_repeated_review_blocker_switches_the_model_before_the_last_try(tmp_path: Path) -> None:
+    """Loop detection (D-loop-fix): the identical blocker twice in a row means
+    the next fix round is forced onto a different provider/model."""
+    runtime = build_pipeline_runtime(
+        tmp_path,
+        reviewer_reply='{"verdict": "reject", "blockers": ["still crashes on empty input"]}',
+        max_review_iterations=2,
+        coder_fallback=True,
+    )
+    pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
+
+    result = pipeline.run(GOAL)
+
+    assert result.reason == "escalated"
+    board = TaskBoard.load(result.board_path)
+    # 1 initial + 2 fix rounds
+    assert board.records["coder"].attempts == 3
+    lines = (tmp_path / "events.jsonl").read_text().splitlines()
+    events = [json.loads(line) for line in lines]
+    switched = [e for e in events if e["kind"] == "pipeline.fix" and "switching model" in e["message"]]
+    assert switched, "the second identical blocker should have triggered a model switch"
+
+
+def test_gateway_exhaustion_during_a_fix_round_escalates_without_extra_tries(tmp_path: Path) -> None:
+    """A provider-chain failure during a fix round is a gateway problem, not a
+    code problem: it must not silently retry as if it were another fix try,
+    and it must not crash the whole run as a bare AgentSystemError."""
+    runtime = build_pipeline_runtime(
+        tmp_path,
+        reviewer_reply='{"verdict": "reject", "blockers": ["bug"]}',
+        max_review_iterations=2,
+        replies={"coder": "not json at all so the router still succeeds once"},
+    )
+
+    class FlakyCoderPipeline(RecordingPipeline):
+        def _coder_fix(self, board, goal, *, error, history, override=None):
+            raise AllProvidersFailed("coder", ["mock_coder/m -> rate_limit"])
+
+    pipeline = FlakyCoderPipeline(runtime, board_path=tmp_path / "board.json")
+
+    result = pipeline.run(GOAL)
+
+    assert result.ok is False
+    assert result.reason == "escalated"
+    assert result.escalation["reason"] == "gateway_exhausted"
+    # the loop stopped at the FIRST gateway failure, not after burning every try
+    board = TaskBoard.load(result.board_path)
+    assert board.records["coder"].attempts == 1  # only the initial (non-fix) call
+
+
+def test_empty_reviewer_output_fails_the_stage(tmp_path: Path) -> None:
+    # An empty completion is a provider failure, never a silent approval: an
+    # empty review must not look like a passing review.
+    runtime = build_pipeline_runtime(tmp_path, reviewer_reply="")
+    pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
+
+    with pytest.raises(AllProvidersFailed):
+        pipeline.run(GOAL)
+
+    board = TaskBoard.load(tmp_path / "board.json")
+    assert board.records["reviewer"].status == FAILED
+    assert "empty" in board.records["reviewer"].error
+    assert board.records["devops"].status == SKIPPED
+
+
 # --------------------------------------------------------------------------- #
-# Phase 3: workspace execution inside the pipeline
+# Phase 3 + auto-checks: workspace execution inside the pipeline
 # --------------------------------------------------------------------------- #
 class StubAgent:
     """An agent with scripted replies, so pipeline logic is testable exactly."""
@@ -259,7 +452,7 @@ def _events(tmp_path: Path) -> list[str]:
     return [_json.loads(line)["kind"] for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_pipeline_writes_files_and_runs_the_tests(tmp_path: Path) -> None:
+def test_pipeline_writes_files_and_runs_auto_checks(tmp_path: Path) -> None:
     runtime = build_pipeline_runtime(
         tmp_path,
         stages=["coder", "tester", "reviewer"],
@@ -297,11 +490,11 @@ def test_pipeline_writes_files_and_runs_the_tests(tmp_path: Path) -> None:
     assert "workspace.apply" in _events(tmp_path)
 
 
-def test_failing_tests_drive_the_fix_loop_even_when_the_review_approves(tmp_path: Path) -> None:
+def test_failing_test_drives_the_autocheck_fix_loop_before_review(tmp_path: Path) -> None:
     runtime = build_pipeline_runtime(
         tmp_path,
         stages=["coder", "tester", "reviewer"],
-        max_fix_iterations=1,
+        max_autocheck_iterations=2,
         apply_workspace=True,
         run_tests=True,
     )
@@ -310,8 +503,8 @@ def test_failing_tests_drive_the_fix_loop_even_when_the_review_approves(tmp_path
         board_path=tmp_path / "board.json",
         replies={
             "coder": [
-                '{"files": [{"path": "check.py", "content": "import sys; sys.exit(1)"}]}',
-                '{"files": [{"path": "check.py", "content": "print(\'fixed\')"}]}',
+                '{"files": [{"path": "check.py", "content": "import sys\\n\\nsys.exit(1)\\n"}]}',
+                '{"files": [{"path": "check.py", "content": "print(\'fixed\')\\n"}]}',
             ],
             "tester": ['{"run_command": "python check.py"}'],
             "reviewer": ['{"verdict": "approve"}'],
@@ -322,28 +515,27 @@ def test_failing_tests_drive_the_fix_loop_even_when_the_review_approves(tmp_path
 
     assert result.ok is True
     assert len(pipeline.stubs["coder"].messages) == 2  # the fix round ran
-    board = TaskBoard.load(result.board_path)
-    assert [entry["ok"] for entry in board.executions] == [False, True]
+    assert len(pipeline.stubs["reviewer"].messages) == 1  # only after checks were clean
     assert result.tests["ok"] is True
-    # the fix round was given the failing output, not a guess
-    assert "execution" in pipeline.stubs["coder"].contexts[-1]
-    fix_lines = [
-        line
-        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        if '"pipeline.fix"' in line
-    ]
-    assert fix_lines and "test run failed" in fix_lines[0]
+    # the fix round got the exact failure, not a guess, and nothing else
+    fix_context = pipeline.stubs["coder"].contexts[-1]
+    assert set(fix_context) == {"code", "error", "history"}
+    assert "FAILED" in fix_context["error"] or "failed" in fix_context["error"].lower()
+    assert "auto-check attempt 1/2" in fix_context["history"]
+
+    kinds = _events(tmp_path)
+    assert "pipeline.autocheck_failed" in kinds
 
 
-def test_pipeline_stops_with_tests_reason_when_tests_keep_failing(tmp_path: Path) -> None:
+def test_autocheck_escalates_after_max_tries_instead_of_failing(tmp_path: Path) -> None:
     runtime = build_pipeline_runtime(
         tmp_path,
         stages=["coder", "tester", "reviewer", "devops"],
-        max_fix_iterations=1,
+        max_autocheck_iterations=1,
         apply_workspace=True,
         run_tests=True,
     )
-    failing = '{"files": [{"path": "check.py", "content": "import sys; sys.exit(2)"}]}'
+    failing = '{"files": [{"path": "check.py", "content": "import sys\\n\\nsys.exit(2)\\n"}]}'
     pipeline = StubPipeline(
         runtime,
         board_path=tmp_path / "board.json",
@@ -357,15 +549,19 @@ def test_pipeline_stops_with_tests_reason_when_tests_keep_failing(tmp_path: Path
     result = pipeline.run(GOAL)
 
     assert result.ok is False
-    assert result.reason == "tests"
+    assert result.reason == "escalated"
+    assert result.escalation["stage"] == "coder"
+    assert result.escalation["reason"] == "test_failed"
+    assert "check.py" in result.escalation["code"]
     board = TaskBoard.load(result.board_path)
-    assert board.records["coder"].attempts == 2
-    assert all(not entry["ok"] for entry in board.executions)
+    assert board.records["coder"].attempts == 2  # 1 initial + 1 allowed fix try
+    # the reviewer never even ran: auto-checks gate it
+    assert board.records["reviewer"].status == SKIPPED
     assert board.records["devops"].status == SKIPPED
-    assert "pipeline.unresolved_tests" in _events(tmp_path)
+    assert "pipeline.escalated" in _events(tmp_path)
 
 
-def test_pipeline_skips_execution_when_there_is_no_command(tmp_path: Path) -> None:
+def test_pipeline_skips_execution_when_there_is_no_test_command(tmp_path: Path) -> None:
     runtime = build_pipeline_runtime(
         tmp_path,
         stages=["coder", "tester", "reviewer"],
@@ -385,7 +581,6 @@ def test_pipeline_skips_execution_when_there_is_no_command(tmp_path: Path) -> No
     result = pipeline.run(GOAL)
 
     assert result.ok is True
-    assert result.tests is None
     assert "exec.skipped" in _events(tmp_path)
 
 
@@ -408,20 +603,3 @@ def test_pipeline_dry_run_reports_files_without_writing_them(tmp_path: Path) -> 
     assert result.ok is True
     assert result.files["written"] == 1  # would have been written
     assert not (tmp_path / "project-root" / "workspace" / result.project).exists()
-
-
-
-
-def test_empty_reviewer_output_fails_the_stage(tmp_path: Path) -> None:
-    # An empty completion is a provider failure, never a silent approval: an
-    # empty review must not look like a passing review.
-    runtime = build_pipeline_runtime(tmp_path, reviewer_reply="")
-    pipeline = RecordingPipeline(runtime, board_path=tmp_path / "board.json")
-
-    with pytest.raises(AllProvidersFailed):
-        pipeline.run(GOAL)
-
-    board = TaskBoard.load(tmp_path / "board.json")
-    assert board.records["reviewer"].status == FAILED
-    assert "empty" in board.records["reviewer"].error
-    assert board.records["devops"].status == SKIPPED

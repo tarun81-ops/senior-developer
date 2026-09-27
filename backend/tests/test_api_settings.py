@@ -22,6 +22,8 @@ from backend.core.provider.registry import Registry
 TOKEN = "test-token-not-secret"
 KEY_VARS = (
     "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+    # LLM gateway 4th vendor / loop-breaker (D-loop-fix)
+    "CEREBRAS_API_KEY",
     # deploy credentials (D41)
     "GITHUB_TOKEN", "RENDER_API_KEY", "RENDER_OWNER_ID",
     # web research (D42)
@@ -141,6 +143,7 @@ def test_keys_are_write_only(client: TestClient, root: Path) -> None:
     assert response.status_code == 200, response.text
     assert response.json()["keys"] == {
         "GEMINI_API_KEY": "set", "GROQ_API_KEY": "missing", "OPENROUTER_API_KEY": "missing",
+        "CEREBRAS_API_KEY": "missing",
         "GITHUB_TOKEN": "missing", "RENDER_API_KEY": "missing", "RENDER_OWNER_ID": "missing",
         "FIRECRAWL_API_KEY": "missing",
     }

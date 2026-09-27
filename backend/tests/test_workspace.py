@@ -132,7 +132,16 @@ def test_apply_overwrites_changed_content_and_reports_it(tmp_path: Path) -> None
     board = _board_with_files(tmp_path, coder=[{"path": "a.py", "content": "one\n"}])
     apply_board(board, workspace, "demo")
 
-    board.records["coder"].parsed = {"files": [{"path": "a.py", "content": "two\n"}]}
+    # a second coder attempt (e.g. a fix round) re-emits the file with new content
+    board.start("coder", agent="coder")
+    board.complete(
+        "coder",
+        text="{}",
+        parsed={"files": [{"path": "a.py", "content": "two\n"}]},
+        target="mock/m",
+        tokens=1,
+        latency_ms=1,
+    )
     report = apply_board(board, workspace, "demo")
 
     assert report.counts()["overwritten"] == 1
@@ -175,8 +184,17 @@ def test_apply_dry_run_writes_nothing(tmp_path: Path) -> None:
 
 def test_apply_ignores_stages_without_a_file_manifest(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path / "workspace")
-    board = _board_with_files(tmp_path, coder=[{"path": "a.py", "content": "x\n"}])
-    board.records["coder"].parsed = {"summary": "no files key at all"}
+    board = TaskBoard.new(run_id="r1", goal="g", stages=["coder"], agents={}, project="demo")
+    board.save(tmp_path / "board.json")
+    board.start("coder", agent="coder")
+    board.complete(
+        "coder",
+        text="{}",
+        parsed={"summary": "no files key at all"},
+        target="mock/m",
+        tokens=1,
+        latency_ms=1,
+    )
 
     report = apply_board(board, workspace, "demo")
 

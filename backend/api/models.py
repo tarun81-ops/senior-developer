@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.core.local_settings import AgentPin, LocalOverrides
 from backend.core.orchestrator.pipeline import APPROVAL_GATES, STAGE_SPECS
+from backend.core.workspace.terminal import MAX_COMMAND_CHARS
 
 # -- run lifecycle ------------------------------------------------------------
 #: Lifecycle states for a run created through the API. ``cancelling`` is the short
@@ -401,6 +402,44 @@ class FileContentResponse(BaseModel):
     binary: bool
     #: True when only the first part of a large file is included
     truncated: bool
+
+
+class TerminalCommandRequest(BaseModel):
+    """``POST /api/runs/{id}/terminal/input`` (D43): one PowerShell line."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(..., min_length=1, max_length=MAX_COMMAND_CHARS)
+
+    @field_validator("command")
+    @classmethod
+    def _one_line(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("command is empty")
+        if "\n" in text.replace("\r\n", "\n"):
+            raise ValueError("one command per line")
+        return text
+
+
+class TerminalStatusResponse(BaseModel):
+    """``GET /api/runs/{id}/terminal`` (D43): whether a shell is running."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    #: The run's project folder the shell was (or will be) started in.
+    cwd: str
+    #: True while a submitted command is still running.
+    busy: bool
+    #: True when no shell is currently alive for this run (none started yet,
+    #: or the last one exited); the next command starts a fresh one.
+    closed: bool
+    #: The event cursor a UI reconnecting to the stream should resume after.
+    last_seq: int
+    #: Set only when the shell failed to start at all (e.g. PowerShell is not
+    #: on this machine).
+    start_error: str | None = None
 
 
 class ProjectsListResponse(BaseModel):

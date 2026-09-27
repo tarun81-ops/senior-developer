@@ -40,7 +40,7 @@ export default function App() {
   return (
     <main className="shell">
       <header>
-        <h1>Senior Developer Agents</h1>
+        <span className="brand">Senior Developer Agents</span>
         {client && (
           <nav className="screens">
             <button type="button" aria-current={screen === "runs" ? "page" : undefined} onClick={() => setScreen("runs")}>

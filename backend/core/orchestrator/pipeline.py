@@ -1,19 +1,32 @@
 """The orchestrator: runs specialist stages in order over a shared task board.
 
-Flow (stage order comes from ``pipeline:`` in config/agents.yaml)::
+Flow for a triaged **small** task (a script, a calculator - see ``triage.py``)::
 
-    planner -> architect -> coder -> tester -> reviewer
-        --(changes_requested: coder fixes, reviewer re-checks,
-            at most max_fix_iterations times)-->
-        --(still changes_requested: stop for a human)-->
+    coder -> auto-checks -> done
+
+Flow for **medium/large** tasks (stage order comes from ``pipeline:`` in
+config/agents.yaml)::
+
+    planner -> architect -> coder -> tester
+        -> auto-checks (py_compile, ruff, pytest; exact error back to the
+           coder as a minimal patch, up to max_autocheck_iterations)
+        -> reviewer
+        --(a BLOCKER: coder fixes, reviewer re-checks, up to
+            max_review_iterations)-->
     devops -> docs
+
+Either loop running out of tries does not just say "failed": it raises
+:class:`PipelineEscalated` with the current code and the exact error attached,
+so a human has something to act on. The same repeated error twice in a row
+switches the coder to the next model in its routing chain before trying again
+(a different model breaks a same-model deadlock better than retrying it).
 
 Design rules this module keeps:
 
   * The agent class does not know it is part of a pipeline; the pipeline tells
     each agent what to do and stores the result on the board.
-  * Stage order, the fix-loop limit and every model choice live in YAML, not
-    here — changing the process is a config edit (D6).
+  * Stage order, the loop limits and every model choice live in YAML, not
+    here - changing the process is a config edit (D6).
   * Every stage transition goes through the event bus, so the CLI shows the
     run live and Phase 4's UI gets the same events over a WebSocket.
   * Any :class:`AgentSystemError` (budget, provider, config) stops the run:
@@ -23,12 +36,21 @@ Design rules this module keeps:
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from backend.core.errors import AgentSystemError, ApprovalRejected, ConfigError, RunCancelled
+from backend.core.errors import (
+    AgentSystemError,
+    AllProvidersFailed,
+    ApprovalRejected,
+    ConfigError,
+    PipelineEscalated,
+    RunCancelled,
+)
+from backend.core.orchestrator import triage
 from backend.core.orchestrator.board import (
     BOARD_CANCELLED,
     BOARD_FAILED,
@@ -41,6 +63,7 @@ from backend.core.workspace import (
     FILE_STAGES,
     ApplyReport,
     CommandNotAllowed,
+    CommandResult,
     CommandRunner,
     Workspace,
     apply_board,
@@ -50,6 +73,8 @@ from backend.core.workspace import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a runtime cycle
     from backend.core.runtime import Runtime
+
+Candidate = tuple[Any, Any]
 
 
 @dataclass(frozen=True)
@@ -65,9 +90,8 @@ class StageSpec:
     agent: str
     instruction: str
     needs: tuple[str, ...] = ()
-    #: set for stages that can be re-run when the reviewer objects (coder)
+    #: set for stages that can be re-run with a hand-built fix context (coder)
     fix_instruction: str | None = None
-    fix_needs: tuple[str, ...] | None = None
     #: Phase 3: show the workspace's last command output in this stage's CONTEXT
     wants_execution: bool = False
 
@@ -87,13 +111,12 @@ STAGE_SPECS: dict[str, StageSpec] = {
         ),
         needs=("planner", "architect"),
         fix_instruction=(
-            "The reviewer requested changes (see ### review in CONTEXT) and/or the "
-            "test run failed (see ### execution in CONTEXT). Apply every requested "
-            "fix and make the failing tests pass, then re-emit the complete JSON "
-            "file manifest with ALL files (not only the changed ones)."
+            "Fix mode. CONTEXT has the current code (### code), the exact error "
+            "(### error) and a one-line history of prior attempts (### history) - "
+            "do not repeat a fix that already failed the same way. Make the "
+            "SMALLEST patch that resolves the error, then re-emit the JSON file "
+            "manifest with ONLY the files you changed, never the whole project."
         ),
-        fix_needs=("planner", "architect", "coder", "reviewer"),
-        wants_execution=True,
     ),
     "tester": StageSpec(
         agent="tester",
@@ -127,9 +150,9 @@ STAGE_SPECS: dict[str, StageSpec] = {
 }
 
 #: verdict strings the reviewer prompt is allowed to produce, and how they map
-#: onto pipeline behaviour
+#: onto pipeline behaviour. Liberal on purpose: free models drift in wording.
 _APPROVE = {"approve", "approved", "lgtm"}
-_REJECT = {"changes_requested", "changes requested", "revise", "reject", "rejected"}
+_REJECT = {"reject", "rejected", "changes_requested", "changes requested", "revise"}
 
 #: The approval gates a run may request (Phase 4, D21). ``plan`` and
 #: ``architecture`` open when their stage completes; ``execution`` opens before
@@ -141,6 +164,17 @@ GATE_AFTER_STAGE: dict[str, str] = {"plan": "planner", "architecture": "architec
 #: stage -> gate, the form the run loop looks up
 _STAGE_GATES: dict[str, str] = {stage: gate for gate, stage in GATE_AFTER_STAGE.items()}
 
+#: deterministic checks that run before pytest, cheapest/most-diagnostic first
+_PRE_TEST_CHECKS: tuple[tuple[str, str], ...] = (
+    ("compile", "python -m compileall -q ."),
+    ("lint", "python -m ruff check ."),
+)
+
+
+def _signature(text: str) -> str:
+    """A short fingerprint of an error, for "is this the same failure again?"."""
+    return hashlib.sha1(" ".join((text or "").split()).lower().encode("utf-8")).hexdigest()
+
 
 @dataclass
 class PipelineResult:
@@ -149,17 +183,22 @@ class PipelineResult:
     run_id: str
     goal: str
     ok: bool
-    reason: str  # "ok" | "review" | "tests" | "cancelled"
+    #: "ok" | "review" | "cancelled" | "rejected" | "escalated"
+    reason: str
     stages: list[str]
     verdict: str | None
     board_path: str
     events_file: str = ""
     budget: dict[str, int] = field(default_factory=dict)
-    #: Phase 3 — where the code went and what running it said
+    #: Phase 3 - where the code went and what running it said
     project: str = ""
     workspace: str = ""
     files: dict[str, int] = field(default_factory=dict)
     tests: dict[str, Any] | None = None
+    #: triage's classification: "small" | "medium" | "large" | "custom"
+    size: str = ""
+    #: set only when reason == "escalated": {"stage", "reason", "error", "code"}
+    escalation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -176,6 +215,8 @@ class PipelineResult:
             "workspace": self.workspace,
             "files": dict(self.files),
             "tests": dict(self.tests) if self.tests else None,
+            "size": self.size,
+            "escalation": dict(self.escalation) if self.escalation else None,
         }
 
 
@@ -187,10 +228,12 @@ class Pipeline:
         runtime: Runtime,
         *,
         stages: list[str] | None = None,
-        max_fix_iterations: int | None = None,
+        triage: bool | None = None,
+        max_autocheck_iterations: int | None = None,
+        max_review_iterations: int | None = None,
         board_path: Path | str | None = None,
-        override: list[tuple[Any, Any]] | None = None,
-        agent_overrides: dict[str, list[tuple[Any, Any]]] | None = None,
+        override: list[Candidate] | None = None,
+        agent_overrides: dict[str, list[Candidate]] | None = None,
         project: str | None = None,
         apply_workspace: bool | None = None,
         run_tests: bool | None = None,
@@ -201,22 +244,28 @@ class Pipeline:
     ) -> None:
         self.runtime = runtime
         config = runtime.registry.pipeline
-        self.stages = list(stages or config.stages)
-        self.max_fix_iterations = (
-            config.max_fix_iterations if max_fix_iterations is None else max_fix_iterations
+        #: explicit stages (CLI --stages, the API request, or a test) bypass
+        #: triage entirely and run exactly what was asked for
+        self._stage_override = list(stages) if stages is not None else None
+        self._default_stages = list(config.stages)
+        self.triage_enabled = config.triage if triage is None else triage
+        self.max_autocheck_iterations = (
+            config.max_autocheck_iterations
+            if max_autocheck_iterations is None
+            else max_autocheck_iterations
         )
-        if not self.stages:
-            raise ConfigError("Pipeline has no stages to run")
-        if self.max_fix_iterations < 0:
-            raise ConfigError("pipeline.max_fix_iterations must be >= 0")
-        for name in self.stages:
-            if name not in STAGE_SPECS:
-                known = ", ".join(STAGE_SPECS)
-                raise ConfigError(
-                    f"Unknown pipeline stage '{name}'. Known stages: {known}"
-                )
-            # raises ConfigError when the stage's agent is missing from config
-            runtime.registry.agent(STAGE_SPECS[name].agent)
+        self.max_review_iterations = (
+            config.max_review_iterations if max_review_iterations is None else max_review_iterations
+        )
+        if self.max_autocheck_iterations < 0:
+            raise ConfigError("pipeline.max_autocheck_iterations must be >= 0")
+        if self.max_review_iterations < 0:
+            raise ConfigError("pipeline.max_review_iterations must be >= 0")
+        #: resolved lazily in run() (triage needs the goal text); validated now
+        #: against whatever we know already so a bad config fails fast
+        self.stages = list(self._stage_override or self._default_stages)
+        self.task_size = "custom" if self._stage_override is not None else ""
+        self._validate_stages(self.stages)
         self.override = override
         #: Phase 4: per-agent routing from the API request
         #: (``[["coder", "groq", "llama"], …]``). A per-agent entry wins over the
@@ -263,23 +312,63 @@ class Pipeline:
         """Hook point: tests replace this to observe/capture agent traffic."""
         return self.runtime.agent(agent_name)
 
+    def _validate_stages(self, stages: list[str]) -> None:
+        if not stages:
+            raise ConfigError("Pipeline has no stages to run")
+        for name in stages:
+            if name not in STAGE_SPECS:
+                known = ", ".join(STAGE_SPECS)
+                raise ConfigError(
+                    f"Unknown pipeline stage '{name}'. Known stages: {known}"
+                )
+            # raises ConfigError when the stage's agent is missing from config
+            self.runtime.registry.agent(STAGE_SPECS[name].agent)
+
+    def _resolve_size(self, goal: str) -> str:
+        """Pick the stage list for this run. Explicit ``stages=`` skips triage."""
+        if self._stage_override is not None:
+            return "custom"
+        size = triage.classify(goal) if self.triage_enabled else "medium"
+        self.stages = list(triage.FAST_LANE_STAGES) if size == "small" else list(self._default_stages)
+        self._validate_stages(self.stages)
+        return size
+
     def _message_for(self, stage: str, goal: str, *, fix: bool) -> str:
         spec = STAGE_SPECS[stage]
         if fix and spec.fix_instruction:
             return spec.fix_instruction
         return spec.instruction or goal
 
-    def _context_for(self, board: TaskBoard, stage: str, *, fix: bool) -> dict[str, str]:
+    def _context_for(self, board: TaskBoard, stage: str) -> dict[str, str]:
         spec = STAGE_SPECS[stage]
-        needs = spec.fix_needs if (fix and spec.fix_needs) else spec.needs
-        # read BEFORE the stage overwrites its own record, so a coder fix round
-        # still sees its previous artifact
-        context = board.artifacts_for(needs)
+        context: dict[str, str] = {}
+        for need in spec.needs:
+            text = board.rendered_files(need) if need in FILE_STAGES else None
+            if text is None:
+                text = board.artifact(need)
+            if text is not None:
+                context[need] = text
         if spec.wants_execution:
             block = board.execution_context()
             if block:
                 context["execution"] = block
         return context
+
+    def _alternate_model(self, agent_name: str, board: TaskBoard) -> list[Candidate] | None:
+        """The rest of the routing chain after whichever candidate just answered.
+
+        Used for loop detection (D-loop-fix): the same error twice in a row
+        means retrying the same model is unlikely to help, so the next fix
+        round is forced onto a different provider/model.
+        """
+        chain = self.runtime.registry.candidate_chain(agent_name)
+        if len(chain) < 2:
+            return None
+        last_target = board.get(agent_name).target
+        for index, (spec, model) in enumerate(chain):
+            if f"{spec.name}/{model.id}" == last_target:
+                return chain[index + 1 :] or None
+        return chain[1:] or None
 
     # -- workspace (Phase 3) -------------------------------------------------
     def _apply(self, board: TaskBoard) -> ApplyReport:
@@ -305,57 +394,6 @@ class Pipeline:
                 rejected=len(report.rejected),
             )
         return report
-
-    def _run_tests(self, board: TaskBoard) -> None:
-        """Run the project's test command and put the result on the board."""
-        if not self.execution.enabled:
-            self.runtime.bus.emit(
-                "exec.skipped", "command execution is disabled (execution.enabled: false)"
-            )
-            return
-        project_dir = self.workspace.project_dir(self._project)
-        command, source = test_command_for(board, project_dir)
-        if not command:
-            self.runtime.bus.emit(
-                "exec.skipped",
-                "no test command: the tester did not name one and none could be detected",
-            )
-            return
-        # Phase 4: the execution gate surfaces the exact command, its working
-        # directory and the timeout before anything is started (D21).
-        self._approval(
-            "execution",
-            {
-                "command": command,
-                "cwd": str(project_dir),
-                "timeout_seconds": self.execution.timeout_seconds,
-            },
-        )
-        self.runtime.bus.emit(
-            "exec.start",
-            f"{command}  (from {source})",
-            project=self._project,
-            command=command,
-            source=source,
-        )
-        try:
-            result = self.runner.run(command, cwd=project_dir)
-        except CommandNotAllowed as exc:
-            # a command we refuse to run is not a crash: skip it, loudly
-            self.runtime.bus.emit("exec.skipped", str(exc), command=command)
-            return
-        board.add_execution(result)
-        self.runtime.bus.emit(
-            "exec.end",
-            f"{command}: {result.summary()}",
-            project=self._project,
-            command=command,
-            ok=result.ok,
-            exit_code=result.exit_code,
-            duration_ms=result.duration_ms,
-            timed_out=result.timed_out,
-            truncated=result.stdout_truncated or result.stderr_truncated,
-        )
 
     # -- approval gates (Phase 4, D21) ---------------------------------------
     def _approval(self, gate: str, payload: dict[str, Any]) -> None:
@@ -389,12 +427,6 @@ class Pipeline:
         return self.cancel_check is not None and self.cancel_check()
 
     @staticmethod
-    def _execution_cancelled(board: TaskBoard) -> bool:
-        """Did the last command run end because a cancel killed it?"""
-        last = board.last_execution
-        return bool(last and last.get("cancelled"))
-
-    @staticmethod
     def _last_started(board: TaskBoard) -> str | None:
         """The most recent stage that is no longer pending, for ``skip_rest``."""
         for stage in reversed(board.order):
@@ -405,6 +437,7 @@ class Pipeline:
     # -- execution ----------------------------------------------------------
     def run(self, goal: str) -> PipelineResult:
         self._project = self._project or slugify(goal)
+        self.task_size = self._resolve_size(goal)
         board = TaskBoard.new(
             run_id=self.runtime.run_id,
             goal=goal,
@@ -420,77 +453,56 @@ class Pipeline:
             goal[:160],
             stages=" -> ".join(self.stages),
             project=self._project,
+            size=self.task_size,
         )
         try:
-            verdict: str | None = None
-            for index, stage in enumerate(self.stages):
-                remaining = self.stages[index + 1 :]
-                if self._cancelled():
-                    # Cooperative stop: the pipeline cannot interrupt a provider
-                    # HTTP call in flight, so cancel takes effect at the next
-                    # stage boundary (or immediately, mid-command, via the
-                    # runner's tree kill).
-                    bus.emit("pipeline.cancelled", f"cancelled before {stage}", stage=stage)
-                    board.skip_rest(after=self._last_started(board))
-                    return self._finish(board, ok=False, reason="cancelled", verdict=verdict)
-                context = self._context_for(board, stage, fix=False)
-                self._execute(board, stage, goal=goal, context=context)
-                # Phase 3: real files, then real evidence
-                if stage in FILE_STAGES:
-                    self._apply(board)
-                # Phase 4: pause for a human at this stage's gate (D21)
-                gate = _STAGE_GATES.get(stage)
-                if gate is not None:
-                    self._approval(
-                        gate,
-                        {"stage": stage, "output": board.get(stage).text[:4000]},
-                    )
-                if stage == "tester" and self.run_tests:
-                    self._run_tests(board)
-                    if self._execution_cancelled(board):
-                        # A cancel killed the command tree mid-run. That is not a
-                        # test failure, so it must not trigger the coder fix loop.
-                        bus.emit("pipeline.cancelled", "cancelled while running tests")
-                        board.skip_rest(after=stage)
-                        return self._finish(
-                            board, ok=False, reason="cancelled", verdict=verdict
-                        )
-                if stage == "reviewer":
-                    verdict = self._review_loop(board, goal)
-                stop = self._stop_reason(board, verdict, remaining)
-                if stop:
-                    if stop == "tests":
-                        last = board.last_execution or {}
-                        self.runtime.bus.emit(
-                            "pipeline.unresolved_tests",
-                            f"test run still failing ({last.get('command')}); "
-                            "stopping for a human",
-                        )
-                    board.skip_rest(after=stage)
-                    return self._finish(board, ok=False, reason=stop, verdict=verdict)
-            return self._finish(board, ok=True, reason="ok", verdict=verdict)
+            if self.task_size == "small":
+                return self._run_fast_lane(board, goal)
+            return self._run_full_pipeline(board, goal)
         except RunCancelled as exc:
-            # Cancelled while blocked at an approval gate: nothing failed, so
-            # no stage is marked failed — the rest is skipped and the board says
-            # cancelled, exactly like a cancel between stages.
+            # Cancelled mid-run or while blocked at an approval gate: nothing
+            # failed, so no stage is marked failed - the rest is skipped and
+            # the board says cancelled.
             board.skip_rest(after=self._last_started(board))
             bus.emit("pipeline.cancelled", str(exc), stage=exc.stage)
-            return self._finish(board, ok=False, reason="cancelled", verdict=verdict)
+            return self._finish(board, ok=False, reason="cancelled", verdict=self._verdict(board))
         except ApprovalRejected as exc:
             # A human said no at a gate: not a stage failure either, but not a
-            # cancellation — the run ends ``failed`` with reason "rejected" and
+            # cancellation - the run ends "failed" with reason "rejected" and
             # the note travels with it (the API turns it into the error text).
             board.skip_rest(after=self._last_started(board))
             bus.emit("approval.rejected", str(exc), gate=exc.gate, note=exc.note)
-            return self._finish(board, ok=False, reason="rejected", verdict=verdict)
+            return self._finish(board, ok=False, reason="rejected", verdict=self._verdict(board))
+        except PipelineEscalated as exc:
+            # The auto-check or review loop ran out of tries. Not a crash: stop
+            # cleanly with the current code and the exact error attached (D4).
+            board.skip_rest(after=self._last_started(board))
+            bus.emit(
+                "pipeline.escalated",
+                f"escalating to a human after repeated '{exc.reason}' failures at '{exc.stage}'",
+                stage=exc.stage,
+                check=exc.reason,
+            )
+            return self._finish(
+                board,
+                ok=False,
+                reason="escalated",
+                verdict=self._verdict(board),
+                escalation={
+                    "stage": exc.stage,
+                    "reason": exc.reason,
+                    "error": exc.error,
+                    "code": exc.code,
+                },
+            )
         except AgentSystemError as exc:
             failed = board.failed_stage
             if failed is None:  # error outside a stage execution; be defensive
                 failed = self.stages[0]
                 board.fail(failed, error=str(exc))
             board.skip_rest(after=failed)
-            # RunCancelled and ApprovalRejected are handled above; anything here
-            # really did stop the run at a failing stage.
+            # RunCancelled, ApprovalRejected and PipelineEscalated are handled
+            # above; anything here really did stop the run at a failing stage.
             board.status = BOARD_FAILED
             board.save()
             bus.emit("error", str(exc), stage=failed)
@@ -503,6 +515,54 @@ class Pipeline:
             )
             raise
 
+    def _run_fast_lane(self, board: TaskBoard, goal: str) -> PipelineResult:
+        """Small task: Coder -> auto-checks -> done. No review, no ceremony."""
+        if self._cancelled():
+            self.runtime.bus.emit("pipeline.cancelled", "cancelled before coder", stage="coder")
+            board.skip_rest(after=None)
+            return self._finish(board, ok=False, reason="cancelled", verdict=None)
+        # No planner/architect to translate the goal into ### plan/### design,
+        # so the fast lane hands it to the coder directly as context - without
+        # this, the coder sees only the generic "implement everything"
+        # instruction and has no idea what "everything" means.
+        self._execute(board, "coder", goal=goal, context={"request": goal})
+        self._apply(board)
+        if self.run_tests:
+            self._autocheck_gate(board, goal)
+        return self._finish(board, ok=True, reason="ok", verdict=None)
+
+    def _run_full_pipeline(self, board: TaskBoard, goal: str) -> PipelineResult:
+        bus = self.runtime.bus
+        verdict: str | None = None
+        for stage in self.stages:
+            if self._cancelled():
+                # Cooperative stop: the pipeline cannot interrupt a provider
+                # HTTP call in flight, so cancel takes effect at the next
+                # stage boundary (or immediately, mid-command, via the
+                # runner's tree kill).
+                bus.emit("pipeline.cancelled", f"cancelled before {stage}", stage=stage)
+                board.skip_rest(after=self._last_started(board))
+                return self._finish(board, ok=False, reason="cancelled", verdict=verdict)
+            context = self._context_for(board, stage)
+            self._execute(board, stage, goal=goal, context=context)
+            # Phase 3: real files, then real evidence
+            if stage in FILE_STAGES:
+                self._apply(board)
+            # Phase 4: pause for a human at this stage's gate (D21)
+            gate = _STAGE_GATES.get(stage)
+            if gate is not None:
+                self._approval(
+                    gate,
+                    {"stage": stage, "output": board.get(stage).text[:4000]},
+                )
+            if stage == "tester" and self.run_tests:
+                # Deterministic gate right after the tests are written: the
+                # reviewer (if any) never sees code that does not even compile.
+                self._autocheck_gate(board, goal)
+            if stage == "reviewer":
+                verdict = self._review_loop(board, goal)
+        return self._finish(board, ok=True, reason="ok", verdict=verdict)
+
     def _execute(
         self,
         board: TaskBoard,
@@ -511,6 +571,7 @@ class Pipeline:
         goal: str,
         context: dict[str, str],
         fix: bool = False,
+        override: list[Candidate] | None = None,
     ) -> None:
         spec = STAGE_SPECS[stage]
         board.start(stage, agent=spec.agent)
@@ -522,7 +583,7 @@ class Pipeline:
             result = agent.run(
                 self._message_for(stage, goal, fix=fix),
                 context=context or None,
-                override=self.agent_overrides.get(spec.agent) or self.override,
+                override=override or self.agent_overrides.get(spec.agent) or self.override,
             )
         except AgentSystemError as exc:
             board.fail(stage, error=str(exc))
@@ -558,77 +619,181 @@ class Pipeline:
             parsed_json=result.parsed is not None,
         )
 
+    # -- minimal-patch coder fix (D5) -----------------------------------------
+    def _coder_fix(
+        self,
+        board: TaskBoard,
+        goal: str,
+        *,
+        error: str,
+        history: str,
+        override: list[Candidate] | None = None,
+    ) -> None:
+        """Re-run the coder with ONLY the current code, the exact error and a
+        one-line history - never the full plan/design/review context. Keeps
+        fix rounds cheap and pushes the coder toward a minimal patch instead
+        of a full rewrite."""
+        context = {
+            "code": board.rendered_files("coder") or board.artifact("coder") or "",
+            "error": error[:6000],
+            "history": history,
+        }
+        self._execute(board, "coder", goal=goal, context=context, fix=True, override=override)
+
+    def _escalate(self, board: TaskBoard, *, stage: str, reason: str, error: str) -> None:
+        code = board.rendered_files("coder") or board.artifact("coder") or ""
+        raise PipelineEscalated(stage=stage, reason=reason, error=error, code=code)
+
+    # -- auto-check gate (D2): py_compile -> ruff -> pytest ------------------
+    def _autocheck_gate(self, board: TaskBoard, goal: str) -> None:
+        """Deterministic checks before the reviewer (or the fast lane) trusts
+        the code. A failure goes back to the coder as an exact-error, minimal
+        patch; the same error twice in a row switches models; after
+        ``max_autocheck_iterations`` tries this escalates instead of dying as
+        a bare "failed"."""
+        if not self.execution.enabled:
+            self.runtime.bus.emit(
+                "exec.skipped", "command execution is disabled (execution.enabled: false)"
+            )
+            return
+        project_dir = self.workspace.project_dir(self._project)
+        seen: list[str] = []
+        tries = 0
+        while True:
+            outcome = self._run_checks(board, project_dir)
+            if outcome is None:
+                return
+            check, result = outcome
+            if result.cancelled:
+                raise RunCancelled(self.runtime.run_id, "coder")
+            error_text = result.context_block()
+            if tries >= self.max_autocheck_iterations:
+                self._escalate(board, stage="coder", reason=f"{check}_failed", error=error_text)
+            tries += 1
+            signature = _signature(error_text)
+            repeated = signature in seen
+            seen.append(signature)
+            self.runtime.bus.emit(
+                "pipeline.autocheck_failed",
+                f"{check} failed; fix attempt {tries}/{self.max_autocheck_iterations}"
+                + (" (same error again - switching model)" if repeated else ""),
+                check=check,
+                attempt=tries,
+                max_attempts=self.max_autocheck_iterations,
+            )
+            override = self._alternate_model("coder", board) if repeated else None
+            history = f"auto-check attempt {tries}/{self.max_autocheck_iterations}: {check} failed"
+            try:
+                self._coder_fix(board, goal, error=error_text, history=history, override=override)
+            except AllProvidersFailed as exc:
+                # A gateway failure (every provider rate-limited/down) is not a
+                # code problem - it does not consume an auto-check attempt, it
+                # ends the loop right away since nothing can fix the code.
+                self._escalate(board, stage="coder", reason="gateway_exhausted", error=str(exc))
+            self._apply(board)
+
+    def _run_checks(
+        self, board: TaskBoard, project_dir: Path
+    ) -> tuple[str, CommandResult] | None:
+        """Run compile -> lint -> test, in order, stopping at the first failure."""
+        commands = list(_PRE_TEST_CHECKS)
+        test_command, _source = test_command_for(board, project_dir)
+        if test_command:
+            commands = [*commands, ("test", test_command)]
+        else:
+            self.runtime.bus.emit(
+                "exec.skipped",
+                "no test command: the tester did not name one and none could be detected",
+            )
+        # Phase 4: one gate for the whole batch (not one per check) - the exact
+        # test command, its working directory and the timeout, before anything
+        # starts (D21).
+        self._approval(
+            "execution",
+            {
+                "command": test_command or (commands[0][1] if commands else ""),
+                "commands": [command for _, command in commands],
+                "cwd": str(project_dir),
+                "timeout_seconds": self.execution.timeout_seconds,
+            },
+        )
+        for check, command in commands:
+            self.runtime.bus.emit(
+                "exec.start",
+                f"{command}  ({check})",
+                project=self._project,
+                command=command,
+                check=check,
+            )
+            try:
+                result = self.runner.run(command, cwd=project_dir)
+            except CommandNotAllowed as exc:
+                # a command we refuse to run is not a crash: skip it, loudly
+                self.runtime.bus.emit("exec.skipped", str(exc), command=command)
+                continue
+            board.add_execution(result)
+            self.runtime.bus.emit(
+                "exec.end",
+                f"{command}: {result.summary()}",
+                project=self._project,
+                command=command,
+                check=check,
+                ok=result.ok,
+                exit_code=result.exit_code,
+                duration_ms=result.duration_ms,
+                timed_out=result.timed_out,
+                truncated=result.stdout_truncated or result.stderr_truncated,
+            )
+            if not result.ok:
+                return check, result
+        return None
+
+    # -- review loop (D3): only a blocker can reject -------------------------
     def _review_loop(self, board: TaskBoard, goal: str) -> str | None:
-        """Run coder fix iterations while the reviewer objects or tests fail."""
+        """Coder<->reviewer rounds while a reviewer BLOCKER stands, up to
+        ``max_review_iterations``. Exhausting it escalates rather than
+        returning a bare "changes requested" for the caller to puzzle over."""
         verdict = self._verdict(board)
-        iterations = 0
-        while iterations < self.max_fix_iterations and "coder" in self.stages:
-            reason = self._fix_reason(board, verdict)
-            if reason is None:
-                break
-            iterations += 1
+        seen: list[str] = []
+        rounds = 0
+        while (
+            verdict == "changes_requested"
+            and "coder" in self.stages
+            and rounds < self.max_review_iterations
+        ):
+            rounds += 1
+            blockers = self._blockers_text(board)
+            signature = _signature(blockers)
+            repeated = signature in seen
+            seen.append(signature)
             self.runtime.bus.emit(
                 "pipeline.fix",
-                f"{reason}; fix iteration {iterations}/{self.max_fix_iterations}",
+                f"reviewer blocked the change; fix round {rounds}/{self.max_review_iterations}"
+                + (" (same blockers again - switching model)" if repeated else ""),
             )
-            self._execute(
-                board,
-                "coder",
-                goal=goal,
-                context=self._context_for(board, "coder", fix=True),
-                fix=True,
-            )
-            # the new code has to be on disk and re-tested before the reviewer
-            # is asked again: evidence, not claims
+            override = self._alternate_model("coder", board) if repeated else None
+            history = f"review round {rounds}/{self.max_review_iterations}: blockers unresolved"
+            try:
+                self._coder_fix(board, goal, error=blockers, history=history, override=override)
+            except AllProvidersFailed as exc:
+                self._escalate(board, stage="coder", reason="gateway_exhausted", error=str(exc))
             self._apply(board)
             if self.run_tests:
-                self._run_tests(board)
-            self._execute(
-                board,
-                "reviewer",
-                goal=goal,
-                context=self._context_for(board, "reviewer", fix=False),
-            )
+                self._autocheck_gate(board, goal)
+            self._execute(board, "reviewer", goal=goal, context=self._context_for(board, "reviewer"))
             verdict = self._verdict(board)
-        self._emit_unresolved_review(board, verdict, iterations)
+        if verdict == "changes_requested":
+            self._escalate(board, stage="reviewer", reason="review_blockers", error=self._blockers_text(board))
         return verdict
 
-    def _fix_reason(self, board: TaskBoard, verdict: str | None) -> str | None:
-        """Why another coder round is warranted, or ``None`` if it is not."""
-        if verdict == "changes_requested":
-            return "review requested changes"
-        if self.run_tests and board.tests_failed:
-            return "the test run failed"
-        return None
-
-    def _stop_reason(
-        self, board: TaskBoard, verdict: str | None, remaining: list[str]
-    ) -> str | None:
-        """Should the pipeline stop before the remaining stages? (D8, D14, D15)"""
-        if verdict == "changes_requested":
-            return "review"
-        if self.run_tests and board.tests_failed:
-            # a fix round may still be possible: let the loop try first
-            if "reviewer" in remaining or "coder" in remaining:
-                return None
-            return "tests"
-        return None
-
-    def _emit_unresolved_review(
-        self, board: TaskBoard, verdict: str | None, iterations: int
-    ) -> None:
-        if verdict != "changes_requested":
-            return
-        if "coder" not in self.stages:
-            detail = "but the coder stage is not part of this run"
-        elif self.max_fix_iterations == 0:
-            detail = "and the fix loop is disabled (max_fix_iterations: 0)"
-        else:
-            detail = f"after {iterations} fix iteration(s)"
-        self.runtime.bus.emit(
-            "pipeline.unresolved_review",
-            f"reviewer requests changes {detail}; stopping for a human",
-        )
+    @staticmethod
+    def _blockers_text(board: TaskBoard) -> str:
+        record = board.get("reviewer")
+        parsed = record.parsed if isinstance(record.parsed, dict) else {}
+        blockers = parsed.get("blockers")
+        if isinstance(blockers, list) and blockers:
+            return "\n".join(f"- {b}" for b in blockers)
+        return record.text
 
     @staticmethod
     def _verdict(board: TaskBoard) -> str | None:
@@ -636,22 +801,35 @@ class Pipeline:
 
         ``None`` means "no usable verdict" (unparsed or unknown wording) and is
         deliberately treated as pass: a formatting quirk of a free model must
-        never deadlock the pipeline — the note is on the board for a human.
+        never deadlock the pipeline - the note is on the board for a human.
+        Only a verdict with at least one blocker may reject (D3): a "reject"
+        with an empty blockers list is a prompt-following slip, not a real one.
         """
+        record = board.get("reviewer")
         raw = board.verdict()
         if raw in _REJECT:
+            blockers = record.parsed.get("blockers") if isinstance(record.parsed, dict) else None
+            if not blockers:
+                record.notes.append(
+                    "verdict was 'reject' with no blockers listed; treated as approval"
+                )
+                return "approve"
             return "changes_requested"
         if raw in _APPROVE:
             return "approve"
         if raw is not None:
-            board.get("reviewer").notes.append(
-                f"unrecognised verdict '{raw}'; treated as approval"
-            )
+            record.notes.append(f"unrecognised verdict '{raw}'; treated as approval")
         return None
 
     # -- finish -------------------------------------------------------------
     def _finish(
-        self, board: TaskBoard, *, ok: bool, reason: str, verdict: str | None
+        self,
+        board: TaskBoard,
+        *,
+        ok: bool,
+        reason: str,
+        verdict: str | None,
+        escalation: dict[str, Any] | None = None,
     ) -> PipelineResult:
         # The board's own status, not the stage records': the API's GET reports it
         # verbatim, so a cancelled run stays visibly cancelled.
@@ -674,6 +852,8 @@ class Pipeline:
             workspace=str(self.workspace.project_dir(self._project, create=False)),
             files=(self._last_apply.counts() if self._last_apply else {}),
             tests=board.last_execution,
+            size=self.task_size,
+            escalation=escalation,
         )
         self.runtime.bus.emit(
             "pipeline.end",

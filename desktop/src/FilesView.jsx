@@ -49,9 +49,9 @@ export default function FilesView({ client, runId, refreshKey }) {
                   aria-current={f.path === selected ? "true" : undefined}
                   onClick={() => setSelected(f.path)}
                 >
-                  {f.path}
-                </button>{" "}
-                <span className="muted">{formatSize(f.size)}</span>
+                  <span>{f.path}</span>
+                  <span className="muted">{formatSize(f.size)}</span>
+                </button>
               </li>
             ))}
           </ul>

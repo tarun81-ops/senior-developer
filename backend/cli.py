@@ -42,10 +42,13 @@ EXIT_OK = 0
 EXIT_PROBLEM = 1
 EXIT_RUNTIME_ERROR = 2
 EXIT_BUDGET = 3
-#: the reviewer still says changes_requested after the fix loop: human decision
+#: legacy: the reviewer still said changes_requested after the fix loop
 EXIT_REVIEW = 4
-#: the workspace test run is still failing after the fix loop: human decision
+#: legacy: the workspace test run was still failing after the fix loop
 EXIT_TESTS = 5
+#: the auto-check or review loop ran out of tries: escalated to a human with
+#: the code and the exact error attached (see PipelineResult.escalation)
+EXIT_ESCALATED = 6
 
 
 # --------------------------------------------------------------------------- #
@@ -370,24 +373,21 @@ def cmd_build(args: argparse.Namespace) -> int:
                 print(f"tests      : {tests.get('command')} -> {state}")
             else:
                 print("tests      : not run")
-            if result.reason == "review":
+            if result.reason == "escalated":
+                info = result.escalation or {}
                 print(
-                    "review     : STILL REQUESTED CHANGES after the fix loop - "
-                    "the human has to decide (board has the issues)."
+                    f"escalated  : repeated '{info.get('reason')}' failures at "
+                    f"'{info.get('stage')}' - a human has to decide. Exact error:"
                 )
-            if result.reason == "tests":
-                print(
-                    "tests      : STILL FAILING after the fix loop - the human has to "
-                    "decide (the board holds the output)."
-                )
+                print(str(info.get("error") or "")[:2000])
             print(f"run budget : {runtime.budget.summary()}")
             print(f"board      : {result.board_path}")
             print(f"events     : {result.events_file}")
 
         if result.ok:
             return EXIT_OK
-        # a human decision is needed; which one is in `reason`
-        return EXIT_TESTS if result.reason == "tests" else EXIT_REVIEW
+        # a human decision is needed; escalated carries the code + error
+        return EXIT_ESCALATED if result.reason == "escalated" else EXIT_REVIEW
     except ConfigError:
         raise  # a wrong config is a setup problem, not a runtime failure
     finally:

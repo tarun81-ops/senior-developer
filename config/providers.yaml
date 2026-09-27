@@ -124,6 +124,31 @@ providers:
         good_at: [review, docs]
 
   # ---------------------------------------------------------------------------
+  # FOURTH VENDOR / LOOP-BREAKER: wafer-scale inference, a generous free tier.
+  # Used as the coder's model-switch target when the same error repeats twice
+  # in a row in the coder<->reviewer loop (D-loop-fix) - a different vendor's
+  # model breaks a same-model deadlock better than retrying the same one.
+  # ---------------------------------------------------------------------------
+  cerebras:
+    label: Cerebras Cloud
+    kind: openai_compatible
+    base_url: https://api.cerebras.ai/v1
+    api_key_env: CEREBRAS_API_KEY
+    notes: >-
+      Free tier is generous but rate-limited per-minute. Verify current model
+      ids with `python -m backend.cli models --provider cerebras --live`.
+    limits:
+      requests_per_minute: 30
+      requests_per_day: 14400
+      tokens_per_minute: 60000
+      tokens_per_day: 1000000
+    models:
+      llama-3.3-70b:
+        context_window: 65536
+        max_output_tokens: 8192
+        good_at: [coding, review, speed]
+
+  # ---------------------------------------------------------------------------
   # OFFLINE SAFETY NET. No key, no network, no quota. Two jobs:
   #   1. let every command work before you have any API key at all, and
   #   2. let the test suite prove the retry / backoff / failover logic.

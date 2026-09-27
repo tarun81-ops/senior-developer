@@ -1061,12 +1061,12 @@ def _single_candidate(
 
 def _reason_to_error(result: PipelineResult) -> str | None:
     """A human sentence for a run that ended without raising."""
-    if result.reason == "review":
-        return "Reviewer requested changes and the fix loop was exhausted."
-    if result.reason == "tests":
-        execution = result.tests or {}
-        command = execution.get("command", "the test command")
-        return f"Tests were still failing after the fix loop ({command})."
+    if result.reason == "escalated":
+        info = result.escalation or {}
+        stage = info.get("stage", "coder")
+        why = info.get("reason", "repeated failures")
+        error = str(info.get("error") or "")[:1000]
+        return f"Escalated at '{stage}' after {why}: {error}"
     if result.reason == "cancelled":
         return "Cancelled by the user."
     return None

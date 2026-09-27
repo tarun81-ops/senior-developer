@@ -166,6 +166,22 @@ class RunCancelled(AgentSystemError):
         self.stage = stage
 
 
+class PipelineEscalated(AgentSystemError):
+    """The coder fix loop (auto-checks or review) ran out of tries.
+
+    Not a crash: the pipeline stops cleanly with the current code and the
+    exact failing error attached (``code``/``error``), so a human gets
+    something actionable instead of a bare "failed".
+    """
+
+    def __init__(self, *, stage: str, reason: str, error: str, code: str) -> None:
+        super().__init__(f"Escalated at '{stage}' ({reason}) after repeated failures")
+        self.stage = stage
+        self.reason = reason
+        self.error = error
+        self.code = code
+
+
 class ApprovalRejected(AgentSystemError):
     """A human rejected the run at an approval gate (Phase 4, D21).
 

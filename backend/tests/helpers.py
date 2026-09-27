@@ -121,12 +121,15 @@ def build_pipeline_runtime(
     *,
     reviewer_reply: str = '{"verdict": "approve"}',
     default_reply: str = "mock reply",
-    max_fix_iterations: int = 1,
+    max_autocheck_iterations: int = 3,
+    max_review_iterations: int = 1,
+    triage: bool = False,
     stages: list[str] | None = None,
     limits: dict | None = None,
     replies: dict[str, str] | None = None,
     apply_workspace: bool = False,
     run_tests: bool = False,
+    coder_fallback: bool = False,
 ):
     """A Runtime whose seven specialist agents all run on offline mocks.
 
@@ -134,7 +137,9 @@ def build_pipeline_runtime(
     stage returns, which is how the fix-loop behaviour is exercised for free.
     ``replies`` overrides the reply for individual agents (e.g. a coder that
     emits a file manifest), and ``apply_workspace``/``run_tests`` switch on the
-    Phase 3 behaviour with everything rooted in ``tmp_path``.
+    Phase 3 behaviour with everything rooted in ``tmp_path``. ``coder_fallback``
+    gives the coder a second routing candidate, so loop-detection's
+    model-switch has somewhere real to switch to.
     """
     from backend.core.config import Settings
     from backend.core.runtime import Runtime
@@ -157,11 +162,17 @@ def build_pipeline_runtime(
             "max_output_tokens": 256,
             "routing": [{"provider": provider.name, "model": "m"}],
         }
+        if name == "coder" and coder_fallback:
+            fallback = mock_provider("mock_coder_fallback", reply=reply)
+            providers[fallback.name] = fallback.model_dump()
+            agents[name]["routing"].append({"provider": fallback.name, "model": "m"})
 
     pipeline_raw = {
         "stages": stages
         or ["planner", "architect", "coder", "tester", "reviewer", "devops", "docs"],
-        "max_fix_iterations": max_fix_iterations,
+        "triage": triage,
+        "max_autocheck_iterations": max_autocheck_iterations,
+        "max_review_iterations": max_review_iterations,
         "apply_workspace": apply_workspace,
         "run_tests": run_tests,
     }

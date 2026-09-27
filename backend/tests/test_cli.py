@@ -137,7 +137,11 @@ def test_build_runs_the_full_pipeline_offline(
     import json
 
     exit_code = cli.main(
-        ["build", "a todo app", "--provider", "mock", "--quiet", "--json"]
+        [
+            "build", "a todo app",
+            "--stages", "planner,architect,coder,tester,reviewer,devops,docs",
+            "--provider", "mock", "--quiet", "--json",
+        ]
     )
     payload = json.loads(capsys.readouterr().out)
 
@@ -199,7 +203,11 @@ def test_build_provider_failure_stops_with_runtime_error(
     import json
 
     exit_code = cli.main(
-        ["build", "goal", "--provider", "mock_flaky", "--fast", "--quiet"]
+        [
+            "build", "goal",
+            "--stages", "planner,architect",
+            "--provider", "mock_flaky", "--fast", "--quiet",
+        ]
     )
     captured = capsys.readouterr()
 
@@ -212,7 +220,7 @@ def test_build_provider_failure_stops_with_runtime_error(
     assert board["records"]["architect"]["status"] == "skipped"
 
 
-def test_build_unresolved_review_returns_exit_code_review(
+def test_build_unresolved_review_escalates_with_exit_code_escalated(
     capsys: pytest.CaptureFixture[str],
     fake_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -228,19 +236,25 @@ def test_build_unresolved_review_returns_exit_code_review(
                 run_id="fake",
                 goal=goal,
                 ok=False,
-                reason="review",
+                reason="escalated",
                 stages=["planner"],
                 verdict="changes_requested",
                 board_path="unused.json",
+                escalation={
+                    "stage": "reviewer",
+                    "reason": "review_blockers",
+                    "error": "still a blocker",
+                    "code": "### file: app.py\nprint(1)",
+                },
             )
 
     monkeypatch.setattr(cli, "Pipeline", FakePipeline)
     exit_code = cli.main(["build", "whatever", "--quiet", "--json"])
 
-    assert exit_code == cli.EXIT_REVIEW
+    assert exit_code == cli.EXIT_ESCALATED
 
 
-def test_build_reports_tests_exit_code_when_tests_keep_failing(
+def test_build_escalates_with_exit_code_escalated_when_autochecks_keep_failing(
     capsys: pytest.CaptureFixture[str],
     fake_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -256,17 +270,23 @@ def test_build_reports_tests_exit_code_when_tests_keep_failing(
                 run_id="fake",
                 goal=goal,
                 ok=False,
-                reason="tests",
+                reason="escalated",
                 stages=["coder", "tester"],
                 verdict="approve",
                 board_path="unused.json",
                 tests={"command": "python -m pytest -q", "ok": False, "exit_code": 1},
+                escalation={
+                    "stage": "coder",
+                    "reason": "test_failed",
+                    "error": "AssertionError: ...",
+                    "code": "### file: app.py\nprint(1)",
+                },
             )
 
     monkeypatch.setattr(cli, "Pipeline", FakePipeline)
     exit_code = cli.main(["build", "whatever", "--quiet", "--json"])
 
-    assert exit_code == cli.EXIT_TESTS
+    assert exit_code == cli.EXIT_ESCALATED
 
 
 def test_build_offline_with_no_apply_and_no_run_tests(

@@ -115,6 +115,7 @@ class TaskBoard:
         order: list[str] | None = None,
         project: str = "",
         executions: list[dict[str, Any]] | None = None,
+        file_index: dict[str, dict[str, dict[str, Any]]] | None = None,
         created_at: str = "",
         updated_at: str = "",
         status: str = BOARD_RUNNING,
@@ -131,6 +132,13 @@ class TaskBoard:
         #: Phase 3: command runs (already serialised, so board.py needs no
         #: import from the workspace package and there is no import cycle)
         self.executions: list[dict[str, Any]] = list(executions or [])
+        #: stage -> path -> file manifest entry, accumulated across every
+        #: attempt of that stage. A coder fix round may emit only the files it
+        #: changed (minimal patch, never a full rewrite); without this, the
+        #: files it did NOT re-emit would look deleted to every later stage.
+        self.file_index: dict[str, dict[str, dict[str, Any]]] = (
+            {k: dict(v) for k, v in file_index.items()} if file_index else {}
+        )
         self.created_at = created_at or _now()
         self.updated_at = updated_at
         self.order: list[str] = list(order or stages)
@@ -179,6 +187,10 @@ class TaskBoard:
             executions=[
                 dict(item) for item in raw.get("executions") or [] if isinstance(item, dict)
             ],
+            file_index={
+                str(stage): {str(p): dict(entry) for p, entry in (files or {}).items()}
+                for stage, files in (raw.get("file_index") or {}).items()
+            },
             created_at=str(raw.get("created_at") or ""),
             updated_at=str(raw.get("updated_at") or ""),
             status=str(raw.get("status") or BOARD_RUNNING),
@@ -231,6 +243,9 @@ class TaskBoard:
             "order": list(self.order),
             "records": {name: rec.to_dict() for name, rec in self.records.items()},
             "executions": list(self.executions),
+            "file_index": {
+                stage: dict(files) for stage, files in self.file_index.items()
+            },
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -254,6 +269,28 @@ class TaskBoard:
             for stage in stages
             if (text := self.artifact(stage)) is not None
         }
+
+    def rendered_files(self, stage: str) -> str | None:
+        """The stage's current files, accumulated across every attempt.
+
+        Not the same as :meth:`artifact`: a coder fix round may reply with
+        only the files it changed, so the *last* raw reply is not "the
+        current code" - the merged file index is.
+        """
+        files = self.file_index.get(stage)
+        if not files:
+            return None
+        parts = []
+        for path, entry in files.items():
+            content = entry.get("content")
+            if isinstance(content, list):
+                content = "\n".join(str(part) for part in content)
+            elif content is None:
+                content = ""
+            else:
+                content = str(content)
+            parts.append(f"### file: {path}\n{content}")
+        return "\n\n".join(parts)
 
     def verdict(self) -> str | None:
         """The reviewer's last verdict, normalised, or None if never reviewed."""
@@ -337,6 +374,14 @@ class TaskBoard:
         record.finished_at = _now()
         if note:
             record.notes.append(note)
+        if isinstance(parsed, dict) and isinstance(parsed.get("files"), list):
+            bucket = self.file_index.setdefault(stage, {})
+            for item in parsed["files"]:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                if path:
+                    bucket[path] = item
         self.save()
         return record
 

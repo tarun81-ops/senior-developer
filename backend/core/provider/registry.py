@@ -107,10 +107,19 @@ class PipelineConfig(_Base):
     """Stage order and review policy for the orchestrator (config, not code)."""
 
     stages: list[str] = Field(default_factory=lambda: list(DEFAULT_PIPELINE_STAGES))
-    max_fix_iterations: int = 1
+    #: classify the goal before spending a call: small tasks skip straight to
+    #: Coder -> auto-checks -> done (no planner/architect/reviewer/devops/docs)
+    triage: bool = True
+    #: deterministic gate before the reviewer: py_compile, ruff, then pytest.
+    #: A failure goes back to the coder as a minimal patch; this many tries
+    #: before escalating to a human instead of just failing.
+    max_autocheck_iterations: int = 3
+    #: only a reviewer *blocker* can request changes; this many coder<->reviewer
+    #: rounds before escalating
+    max_review_iterations: int = 2
     #: Phase 3: materialise the stages' `files` into workspace/<project>/
     apply_workspace: bool = True
-    #: Phase 3: run the tester's command and feed the result back into the fix loop
+    #: Phase 3: run the auto-check gate (py_compile/ruff/pytest) before review
     run_tests: bool = True
 
 

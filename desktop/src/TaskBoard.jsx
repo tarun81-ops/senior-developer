@@ -21,7 +21,7 @@ function StageCard({ stage, output }) {
     <article className="stage-card" data-stage={stage.stage} data-status={stage.status}>
       <header>
         <strong>{stage.stage}</strong>
-        <span className="stage-status">{stage.status}</span>
+        <span className="stage-status" data-status={stage.status}>{stage.status}</span>
         {output?.target && <code className="muted">{output.target}</code>}
       </header>
       {output && (
@@ -57,7 +57,7 @@ function TestResult({ tests }) {
     <article className="stage-card" data-stage="tests" data-status={tests.ok ? "done" : "failed"}>
       <header>
         <strong>Tests</strong>
-        <span className="stage-status" data-field="test-result">{result}</span>
+        <span className="stage-status" data-field="test-result" data-status={tests.ok ? "done" : "failed"}>{result}</span>
       </header>
       <pre className="verbatim">{tests.command}</pre>
       {["stdout", "stderr"].map((stream) => tests[stream] && (

@@ -1412,6 +1412,69 @@ doesn't just answers without research, which is today's behaviour.
 
 ---
 
+## D43 — Terminal tab: a real PowerShell for the person, kept apart from the agents' sandbox
+
+**Decision:** each run gets a **Terminal** tab: a real, interactive
+`powershell.exe`, started lazily in that run's project folder, that the
+*person* can type into.
+
+* **A second execution path, not a hole in the first one.** The agents'
+  commands still only ever go through `CommandRunner`
+  (`backend/core/workspace/runner.py`): argv-only, `shell=False`, allowlisted
+  by executable — `powershell` included on the refused list, unchanged.
+  That allowlist exists because a model's output is untrusted input; it says
+  nothing about the person who is already running this app on their own
+  machine with full access to it already. The terminal is for them, and the
+  agents can never reach it or anything typed into it.
+* **What it bounds.** Not *what* can run — that would be theatre, since the
+  person could open a real PowerShell window instead anyway — only *where*
+  and *how long*:
+  * cwd is fixed to the run's own `workspace/<project>/` folder when the
+    shell starts (nothing stops `cd ..` after that, on purpose — it is a
+    real terminal from then on);
+  * exactly one shell per run, started on first use and killed on API
+    shutdown, so a forgotten tab never leaves a `powershell.exe` running
+    after the app closes;
+  * output is buffered **in memory only**, capped at 400,000 characters —
+    never written to disk, and lost when the API process ends, unlike a
+    run's own event history (D19).
+* **No real pseudo-terminal.** The shell is fed one line at a time over a
+  plain pipe (`backend/core/workspace/terminal.py`): no ANSI colour, no
+  in-place progress bars, no `Read-Host`. A marker line written after every
+  command (`Write-Output "<marker>:$(if ($?) {0} else {1})"`) tells the
+  reader where that command's output ends and carries a best-effort
+  success flag — PowerShell's `$?`, not a real exit code, since one isn't
+  always available without a console attached.
+* **Busy is real.** A command that never returns (a dev server, `ping -t`)
+  keeps the shell busy exactly as it would in a real terminal; **Stop**
+  sends Ctrl+Break (best-effort — not every command listens), and
+  **Restart shell** kills the process outright. Either way the next command
+  starts a fresh shell automatically; the sequence numbers a client has
+  already seen never reset, so a UI reconnect is never confused by it.
+* **API.** `GET /api/runs/{id}/terminal` (status; starts the shell on first
+  call), `GET .../terminal/stream` (SSE, replay-then-live, never closes on
+  its own — a shell exit is just another chunk), `POST .../terminal/input`
+  (`409` while busy, `422` for more than one line), `POST .../interrupt`,
+  `POST .../restart`. All four return `404` before the run has a project
+  folder, the same as the file routes (D30).
+* **UI.** A plain scrolling `<pre>` and a one-line input, not a full
+  terminal emulator — there is nothing underneath to emulate a cursor or
+  colour for. The submitted command is echoed client-side; the shell itself
+  never echoes it.
+
+**Why:** people debugging or exploring a generated project reach for a
+terminal constantly (`npm install`, `git status`, poking at a file) and
+switching to a separate PowerShell window every time is friction the app can
+remove — without touching the boundary that keeps agent-authored commands
+out of a shell in the first place.
+
+**Cost accepted:** it is not a full terminal emulator (no colour, no TUI
+apps, one line in at a time), and history is lost on restart — both
+acceptable for "run a command and see what happened," which is what this is
+for.
+
+---
+
 ## Phase plan
 
 | Phase | Deliverable | Status |

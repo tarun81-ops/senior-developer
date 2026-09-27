@@ -9,8 +9,15 @@ import ApprovalDialog from "./ApprovalDialog.jsx";
 import DeployView from "./DeployView.jsx";
 import FilesView from "./FilesView.jsx";
 import TaskBoard from "./TaskBoard.jsx";
+import TerminalView from "./TerminalView.jsx";
 
-const TABS = [["timeline", "Timeline"], ["board", "Task board"], ["files", "Files"], ["deploy", "Deploy"]];
+const TABS = [
+  ["timeline", "Timeline"],
+  ["board", "Task board"],
+  ["files", "Files"],
+  ["terminal", "Terminal"],
+  ["deploy", "Deploy"],
+];
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -74,23 +81,14 @@ export default function RunView({ client, runId }) {
 
   return (
     <section className="card run" aria-label="Run">
-      <div className="run-head">
-        <h2>{run ? run.request : "Loading run…"}</h2>
-        <span className="status-pill" data-status={run?.status}>{statusText(run)}</span>
-        {run && !finished && !closed && (
-          <button type="button" onClick={cancel} disabled={cancelling || run.status === "cancelling"}>
-            {cancelling || run.status === "cancelling" ? "Cancelling…" : "Cancel run"}
-          </button>
-        )}
-      </div>
-      <p className="muted">
-        Run <code>{runId}</code>{run?.project && <> · project <code>{run.project}</code></>}
-      </p>
       {waiting && (
-        <p className="notice">
-          Waiting for your approval at the <strong>{run.gate.gate}</strong> gate.{" "}
-          <button type="button" onClick={() => setDismissedWait(0)}>Review and decide</button>
-        </p>
+        <div className="notice notice-banner">
+          <div>
+            <span className="tag tag-accent">Waiting for approval</span>
+            <p>Waiting for your approval at the <strong>{run.gate.gate}</strong> gate.</p>
+          </div>
+          <button type="button" className="approve" onClick={() => setDismissedWait(0)}>Review and decide</button>
+        </div>
       )}
       {waiting && (
         <ApprovalDialog
@@ -101,9 +99,31 @@ export default function RunView({ client, runId }) {
           onClose={() => setDismissedWait(waits)}
         />
       )}
+      <div className="run-head">
+        <div>
+          {run?.project && <span className="tag tag-neutral">Project · {run.project}</span>}
+          <h1>{run ? run.request : "Loading run…"}</h1>
+          <p className="muted">
+            {run && `${startedLabel(run)} · `}run <code>{runId}</code>
+          </p>
+        </div>
+        <div className="run-head-actions">
+          <span className="status-pill" data-status={run?.status}>{statusText(run)}</span>
+          {run && !finished && !closed && (
+            <button type="button" className="cancel-run" onClick={cancel} disabled={cancelling || run.status === "cancelling"}>
+              {cancelling || run.status === "cancelling" ? "Cancelling…" : "Cancel run"}
+            </button>
+          )}
+        </div>
+      </div>
       {run?.error && <p className="error">{run.error}</p>}
       {streamError && <p className="error">Event stream: {streamError}</p>}
-      {run && <StageTimeline stages={run.stage_states} />}
+      {run && (
+        <>
+          <span className="eyebrow">Pipeline</span>
+          <StageTimeline stages={run.stage_states} agents={run.agents} />
+        </>
+      )}
       <div className="tabs" role="tablist">
         {TABS.map(([id, label]) => (
           <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>
@@ -114,6 +134,7 @@ export default function RunView({ client, runId }) {
       {tab === "timeline" && <EventLog events={events} />}
       {tab === "board" && run && <TaskBoard run={run} />}
       {tab === "files" && <FilesView client={client} runId={runId} refreshKey={run?.status} />}
+      {tab === "terminal" && <TerminalView client={client} runId={runId} />}
       {tab === "deploy" && <DeployView client={client} runId={runId} refreshKey={run?.status} />}
     </section>
   );
@@ -125,18 +146,54 @@ function statusText(run) {
   return run.status.replace("_", " ");
 }
 
-function StageTimeline({ stages }) {
+function startedLabel(run) {
+  const at = run.started_at || run.created_at;
+  return at ? `Started ${timeAgo(at)}` : "Not started yet";
+}
+
+function timeAgo(iso) {
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function StageTimeline({ stages, agents }) {
+  const byStage = new Map(agents.map((a) => [a.stage ?? a.agent, a]));
   return (
-    <ol className="timeline" aria-label="Stages">
-      {stages.map((stage) => (
-        <li key={stage.stage} data-status={stage.status}>
-          <span className="stage-name">{stage.stage}</span>
-          <span className="stage-status">{stage.status}</span>
-          {stage.error && <span className="error"> {stage.error}</span>}
-        </li>
-      ))}
-    </ol>
+    <div className="pipeline" aria-label="Stages">
+      {stages.map((stage, i) => {
+        const output = byStage.get(stage.stage);
+        return (
+          <div className="stage-row" key={stage.stage}>
+            <p className="stage-n">{String(i + 1).padStart(2, "0")}</p>
+            <h3 className="stage-name">{stage.stage}</h3>
+            <p className="stage-model muted">{output?.target || ""}</p>
+            <div className="stage-end">
+              <span className="stage-meta muted">{stageMeta(stage.status, output)}</span>
+              <span className="tag" data-status={stage.status}>{stage.status}</span>
+            </div>
+            {stage.error && <p className="error stage-error">{stage.error}</p>}
+          </div>
+        );
+      })}
+    </div>
   );
+}
+
+function stageMeta(status, output) {
+  if (status === "running") return "in progress";
+  if (status === "pending") return "not started";
+  if (status === "skipped") return "skipped";
+  if (!output) return "";
+  const bits = [];
+  if (output.duration_ms != null) bits.push(`${(output.duration_ms / 1000).toFixed(1)}s`);
+  const tokens = Object.values(output.tokens).reduce((a, b) => a + b, 0);
+  if (tokens) bits.push(`${tokens} tok`);
+  return bits.join(" · ");
 }
 
 function EventLog({ events }) {

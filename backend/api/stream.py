@@ -23,6 +23,7 @@ from backend.api.event_store import EventStore
 from backend.api.models import TERMINAL_STATUSES
 from backend.api.repository import StoredEvent
 from backend.api.run_manager import RunManager
+from backend.core.workspace.terminal import TerminalChunk, TerminalRecord
 
 #: Kinds of the one closing event every managed run, and every deploy (D40), gets.
 CLOSING_KINDS = frozenset(f"api.run_{status}" for status in TERMINAL_STATUSES) | {
@@ -97,3 +98,39 @@ async def event_frames(
         if time.monotonic() - last_write >= heartbeat:
             yield f": keepalive {int(time.time())}\n\n"
             last_write = time.monotonic()
+
+
+def terminal_frame(chunk: TerminalChunk) -> str:
+    """One SSE message for one terminal chunk (D43). ``id`` resumes it, same
+    as :func:`sse_frame` does for a run event."""
+    return f"id: {chunk.seq}\ndata: {json.dumps(chunk.to_dict())}\n\n"
+
+
+async def terminal_frames(
+    record: TerminalRecord,
+    *,
+    after_seq: int,
+    heartbeat: float = HEARTBEAT_SECONDS,
+) -> AsyncIterator[str]:
+    """Yield SSE frames of terminal output after ``after_seq``, forever.
+
+    Unlike :func:`event_frames`, this never closes on its own — a shell
+    exiting is just another chunk (``closed: true``), not the end of the
+    stream: the next submitted command transparently starts a fresh session
+    and the same stream keeps delivering its output. The connection ends
+    only when the client disconnects.
+
+    ``record.replay_and_wait`` already blocks for up to ``heartbeat``
+    seconds, so an empty page *is* the heartbeat tick — there is no separate
+    idle timer to run here, unlike the run-event stream, which has to poll a
+    SQLite ``wait_for`` and a real clock.
+    """
+    cursor = after_seq
+    while True:
+        page = await run_in_threadpool(record.replay_and_wait, cursor, timeout=heartbeat)
+        if not page:
+            yield f": keepalive {int(time.time())}\n\n"
+            continue
+        for chunk in page:
+            yield terminal_frame(chunk)
+            cursor = chunk.seq

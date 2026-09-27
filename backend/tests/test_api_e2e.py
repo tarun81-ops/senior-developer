@@ -361,6 +361,7 @@ def test_no_response_ever_contains_a_key_value(
             "set",
         ),
         "RENDER_OWNER_ID": "missing",
+        "CEREBRAS_API_KEY": "missing",
     }
     bodies.append(put.text)
     bad_value = {"GEMINI_API_KEY": FAKE_KEYS["GEMINI_API_KEY"] + " x"}

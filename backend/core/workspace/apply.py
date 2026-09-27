@@ -134,7 +134,13 @@ def _content_of(item: dict[str, Any]) -> str:
 def collect_entries(
     board: TaskBoard, stages: Iterable[str] = FILE_STAGES
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Every ``(stage, file_entry)`` a board produced, in application order."""
+    """Every ``(stage, file_entry)`` a board produced, in application order.
+
+    Reads the board's accumulated ``file_index`` first (a coder fix round may
+    have emitted only the files it changed, so that - not the last raw reply -
+    is "the current files" for that stage). Falls back to the stage's own
+    ``parsed.files`` for a board saved before ``file_index`` existed.
+    """
     # Imported here, not at module level: backend.core.orchestrator imports
     # this package, so a top-level import made `import backend.core.workspace`
     # fail whenever it came first (same pattern as runner.test_command_for).
@@ -143,12 +149,20 @@ def collect_entries(
     entries: list[tuple[str, dict[str, Any]]] = []
     for stage in stages:
         record = board.records.get(stage)
-        if record is None or record.status != DONE or not isinstance(record.parsed, dict):
+        if record is None or record.status != DONE:
             continue
-        files = record.parsed.get("files")
-        if not isinstance(files, list):
+        files = board.file_index.get(stage)
+        if files:
+            for item in files.values():
+                if str(item.get("path") or "").strip():
+                    entries.append((stage, item))
             continue
-        for item in files:
+        if not isinstance(record.parsed, dict):
+            continue
+        raw_files = record.parsed.get("files")
+        if not isinstance(raw_files, list):
+            continue
+        for item in raw_files:
             if isinstance(item, dict) and str(item.get("path") or "").strip():
                 entries.append((stage, item))
     return entries

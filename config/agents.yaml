@@ -95,6 +95,11 @@ agents:
         model: gemini-3.8-flash
       - provider: groq
         model: qwen/qwen3.8-27b
+      # LLM gateway (D-loop-fix): a third, independent vendor before the free
+      # OpenRouter tier. Also the loop-detection target - a repeated error in
+      # the fix loop forces the NEXT candidate here, not a retry of the same one.
+      - provider: cerebras
+        model: llama-3.3-70b
       - provider: openrouter
         model: qwen/qwen3.8-27b:free
       - provider: mock
@@ -125,6 +130,8 @@ agents:
         model: qwen/qwen3.8-27b:free
       - provider: openrouter
         model: z-ai/glm-5.2:free
+      - provider: cerebras
+        model: llama-3.3-70b
       - provider: gemini
         model: gemini-3.8-flash
       - provider: mock
@@ -157,18 +164,27 @@ agents:
         model: mock-echo
 
 # ==============================================================================
-# Phase 2 pipeline: stage order and review policy (rationale in docs/DECISIONS.md).
-#   planner -> architect -> coder -> tester -> reviewer
-#     -> (if reviewer says changes_requested: coder fixes, reviewer re-checks,
-#         at most max_fix_iterations times)
-#     -> devops -> docs
+# Pipeline (D-loop-fix): stage order and loop policy.
+#   small task (triage):  coder -> auto-checks -> done
+#   medium/large:         planner -> architect -> coder -> tester
+#                            -> auto-checks (py_compile, ruff, pytest; exact
+#                               error back to the coder as a minimal patch, up
+#                               to max_autocheck_iterations)
+#                            -> reviewer
+#                            -> (a BLOCKER: coder fixes, reviewer re-checks,
+#                               up to max_review_iterations)
+#                            -> devops -> docs
+# Either loop running out of tries escalates to a human with the code and the
+# exact error attached, instead of just reporting "failed".
 # A stage name must also be an agent defined above.
 # ==============================================================================
 pipeline:
   stages: [planner, architect, coder, tester, reviewer, devops, docs]
-  max_fix_iterations: 1
+  # classify the goal before spending a call; small tasks use the fast lane
+  triage: true
+  max_autocheck_iterations: 3
+  max_review_iterations: 2
   # Phase 3: write the stages' `files` into workspace/<project>/ and run the
-  # tester's command after it. Test failures feed the coder fix loop exactly
-  # like a changes_requested review. Turn off with --no-apply / --no-run-tests.
+  # auto-check gate. Turn off with --no-apply / --no-run-tests.
   apply_workspace: true
   run_tests: true

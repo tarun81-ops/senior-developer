@@ -246,6 +246,7 @@ phases, each ending with something you can run:
 | B4 | Task board + read-only file viewer | **done** |
 | B5 | Settings (model per agent, keys write-only, ignored-overrides warning) | **done** |
 | B6 | Run history + polish | **done** |
+| B7 | Terminal tab: a real PowerShell in the run's project folder (D43) | **done** |
 
 Install and run (PowerShell, from the repo root; Node 20+ and the `.venv`
 from the Quickstart):
@@ -376,6 +377,24 @@ What B6 gives you:
   quota. Production builds (`npm start`) don't contain it, and a test builds
   the production bundle to prove that.
 
+What B7 gives you: a **Terminal** tab, next to Files.
+
+- **A real PowerShell**, started in the run's own project folder the first
+  time you open the tab. Type a command, press **Run** (or Enter); output
+  streams back live. It's a plain scrolling log, not a full terminal
+  emulator — no colour, no in-place progress bars, one line at a time — but
+  `cd`, environment variables and everything else persist between commands
+  exactly like a real session, because it *is* one.
+- **This is entirely separate from what the agents can run.** Their commands
+  still only ever go through the sandboxed, allowlisted `CommandRunner`
+  (D43); nothing typed here is ever visible to them, and nothing they do can
+  reach this terminal.
+- **Stop** sends Ctrl+Break to a command that's still running (best-effort —
+  not every command listens to it). **Restart shell** kills it outright; the
+  next command you type starts a fresh one automatically.
+- Output is kept in memory only, for as long as the API process runs — it is
+  not saved anywhere, and a closed app means a clean slate next time.
+
 How it fits together (D25, D26):
 
 - **Starting the backend.** The shell generates the per-launch token itself
@@ -468,8 +487,9 @@ backend/
     agents/             Agent base class, JSON extractor, prompts/*.md
     events/             EventBus + JSONL writer
     orchestrator/       BudgetTracker, TaskBoard (board.json), Pipeline (stage runner)
-    workspace/          sandbox paths, apply (board -> files), CommandRunner
-  tests/                387 tests, no network, no keys required
+    workspace/          sandbox paths, apply (board -> files), CommandRunner,
+                        terminal.py (a person's own PowerShell, D43)
+  tests/                no network, no keys required
 desktop/                Electron shell + React/Vite UI (Phase 4, Part B)
   electron/main.cjs     sda://app protocol, window lockdown, CSP, --smoke
   electron/backend.cjs  token generation, backend launch, SDA_READY, graceful stop
@@ -501,7 +521,9 @@ workspace/              where generated apps will live — git-ignored
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python -m pytest          # 387 tests (2 skipped without symlink rights), ~90s
+.\.venv\Scripts\python -m pytest          # (2 skipped without symlink rights); ~90s
+                                           # test_workspace_terminal.py and test_api_terminal.py
+                                           # (D43) spawn a real powershell.exe, Windows-only
 ```
 
 ```powershell
